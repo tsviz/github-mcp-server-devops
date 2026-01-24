@@ -1,0 +1,58 @@
+version: '3.8'
+
+services:
+  mcp-devops-observer:
+    image: ghcr.io/tsviz/github-mcp-server-devops:latest
+    container_name: mcp-devops-observer-enterprise
+    restart: unless-stopped
+    environment:
+      # GitHub Enterprise Configuration
+      GITHUB_ENTERPRISE_SLUG: ${GITHUB_ENTERPRISE_SLUG}
+      GITHUB_ENTERPRISE_URL: ${GITHUB_ENTERPRISE_URL:-https://api.github.com}
+      GITHUB_APP_ID: ${GITHUB_APP_ID}
+      GITHUB_INSTALLATION_ID: ${GITHUB_INSTALLATION_ID}
+      GITHUB_PRIVATE_KEY: ${GITHUB_PRIVATE_KEY}
+      
+      # Enterprise Features
+      ENABLE_COST_TRACKING: ${ENABLE_COST_TRACKING:-true}
+      ENABLE_TEAM_METRICS: ${ENABLE_TEAM_METRICS:-true}
+      ENABLE_AUDIT_LOGGING: ${ENABLE_AUDIT_LOGGING:-true}
+      COMPLIANCE_FRAMEWORK: ${COMPLIANCE_FRAMEWORK:-SOC2}
+      
+      # Optional: Webhook Configuration
+      ENABLE_WEBHOOKS: ${ENABLE_WEBHOOKS:-false}
+      WEBHOOK_PORT: ${WEBHOOK_PORT:-3000}
+      WEBHOOK_SECRET: ${WEBHOOK_SECRET}
+      
+      # MCP Configuration
+      MCP_SERVER_NAME: ${MCP_SERVER_NAME:-devops-observer-enterprise}
+      MCP_SERVER_VERSION: ${MCP_SERVER_VERSION:-2.0.0}
+      
+      # Logging
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+    
+    # For stdio mode (default)
+    stdin_open: true
+    tty: true
+    
+    # If using webhook mode, expose the port
+    ports:
+      - "${WEBHOOK_PORT:-3000}:3000"
+    
+    # Volume for persistent cache (optional)
+    volumes:
+      - mcp-cache:/app/.cache
+    
+    # Resource limits
+    deploy:
+      resources:
+        limits:
+          cpus: '2'
+          memory: 2G
+        reservations:
+          cpus: '0.5'
+          memory: 512M
+
+volumes:
+  mcp-cache:
+    driver: local
