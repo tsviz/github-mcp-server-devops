@@ -1,0 +1,60 @@
+# Repository Inventory for ActionsPulse
+# This file defines which repositories to monitor and analyze
+
+apiVersion: devops-observer/v1
+kind: RepositoryInventory
+metadata:
+  name: octodemo-inventory
+  version: "1.0.0"
+  description: "Repository inventory for octodemo organization"
+
+spec:
+  # Discovery settings - disabled to only monitor explicit repos
+  discovery:
+    enabled: false
+    includeArchived: false
+    includeForked: false
+
+  # Explicitly defined repositories to monitor
+  repositories:
+    - name: java-springboot-demo
+      team: platform-engineering
+      tier: tier-1
+      compliance:
+        - SOC2
+        - HIPAA
+      owner: tsviz
+      tags:
+        - java
+        - springboot
+        - production
+
+    - name: dotnet-razor-pages-movie
+      team: platform-engineering
+      tier: tier-2
+      compliance:
+        - SOC2
+      owner: tsviz
+      tags:
+        - dotnet
+        - razor
+        - demo
+
+  # Repository groups for bulk configuration
+  groups:
+    production:
+      repositories:
+        - java-springboot-demo
+        - ghsioux-bookstore-ts
+        - cosmic-cactus-bookstore-5
+        - demo-vulnerabilities-ghas-felickz
+
+
+      tier: tier-1
+      team: platform-engineering
+
+    demo:
+      repositories:
+        - dotnet-razor-pages-movie
+      tier: tier-2
+      team: platform-engineering

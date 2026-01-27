@@ -1,0 +1,166 @@
+# ActionsPulse Configuration Example
+# This file configures global ActionsPulse settings
+# Place in: config/devops-config.yaml
+
+apiVersion: devops-observer/v1
+kind: DevOpsConfig
+metadata:
+  name: devops-observer-config
+  version: "1.0.0"
+  description: "ActionsPulse configuration"
+
+spec:
+  # =============================================================================
+  # GITHUB CONFIGURATION
+  # =============================================================================
+  github:
+    # Default organization (can be overridden by GITHUB_ORG env var)
+    organization: your-organization
+    
+    # Default branch for repositories
+    defaultBranch: main
+    
+    # API settings
+    api:
+      baseUrl: https://api.github.com    # Use custom for GitHub Enterprise
+      maxRetries: 3
+      retryDelayMs: 1000
+
+  # =============================================================================
+  # METRICS COLLECTION
+  # =============================================================================
+  metrics:
+    # Enable metrics collection
+    enabled: true
+    
+    # Collection interval in seconds
+    collectInterval: 300
+    
+    # How long to retain metrics data (days)
+    retentionDays: 90
+    
+    # Prometheus metrics endpoint settings
+    prometheus:
+      enabled: true
+      port: 9090
+      path: /metrics
+
+  # =============================================================================
+  # DORA METRICS CONFIGURATION
+  # =============================================================================
+  dora:
+    # Enable DORA metrics tracking
+    enabled: true
+    
+    # Environments considered "production" for deployment frequency
+    productionEnvironments:
+      - production
+      - prod
+      - live
+    
+    # Workflows to exclude from DORA calculations
+    excludeWorkflows:
+      - "dependabot/*"
+      - "codeql-*"
+      - "*-docs"
+    
+    # Lead time calculation settings
+    leadTime:
+      # Track from first commit or PR creation
+      startFrom: first-commit    # Options: first-commit, pr-created
+      # End at merge or deployment
+      endAt: deployment          # Options: merge, deployment
+
+  # =============================================================================
+  # ALERTING CONFIGURATION
+  # =============================================================================
+  alerts:
+    # Enable alerting
+    enabled: true
+    
+    # Workflow failure rate thresholds
+    failureRate:
+      warning: 5                 # Warn when failure rate > 5%
+      critical: 10               # Critical when failure rate > 10%
+    
+    # Queue time thresholds (seconds)
+    queueTime:
+      warning: 180               # Warn when queue time > 3 minutes
+      critical: 300              # Critical when queue time > 5 minutes
+    
+    # Deployment frequency thresholds (per day)
+    deploymentFrequency:
+      warning: 1                 # Warn if < 1 deployment/day
+      critical: 0.1              # Critical if < 1 deployment/10 days
+    
+    # Change failure rate thresholds
+    changeFailureRate:
+      warning: 10                # Warn when CFR > 10%
+      critical: 25               # Critical when CFR > 25%
+
+  # =============================================================================
+  # COMPLIANCE CONFIGURATION
+  # =============================================================================
+  compliance:
+    # Default compliance frameworks to check
+    frameworks:
+      - SOC2
+      - HIPAA
+    
+    # Enable automatic compliance auditing
+    autoAudit:
+      enabled: true
+      schedule: "0 0 * * 0"      # Weekly on Sunday at midnight
+    
+    # Compliance check settings
+    checks:
+      # Branch protection requirements
+      branchProtection:
+        required: true
+        requiredReviewers: 1
+      
+      # Security scanning requirements
+      securityScanning:
+        secretScanning: true
+        dependabotAlerts: true
+        codeScanning: false      # Optional for tier-2+
+
+  # =============================================================================
+  # REPORTING CONFIGURATION
+  # =============================================================================
+  reports:
+    # Output directory for generated reports
+    outputPath: /app/reports
+    
+    # Report formats to generate
+    formats:
+      - markdown
+      - json
+    
+    # Include visualizations
+    includeCharts: true
+    
+    # Auto-generate reports
+    autoGenerate:
+      enabled: false
+      schedule: "0 6 * * 1"      # Weekly on Monday at 6 AM
+      types:
+        - dora
+        - compliance
+        - performance
+
+  # =============================================================================
+  # CACHE CONFIGURATION
+  # =============================================================================
+  cache:
+    # Enable API response caching
+    enabled: true
+    
+    # Default TTL in seconds
+    ttlSeconds: 300
+    
+    # Per-endpoint TTL overrides
+    endpoints:
+      workflowRuns: 60           # Refresh more frequently
+      repositories: 3600         # Cache longer
+      deployments: 120

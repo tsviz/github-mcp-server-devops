@@ -2,7 +2,7 @@ version: '3.8'
 
 services:
   mcp-devops-observer:
-    image: ghcr.io/tsviz/github-mcp-server-devops:latest
+    image: ghcr.io/tsviz/actions-pulse:latest
     container_name: mcp-devops-observer-enterprise
     restart: unless-stopped
     environment:

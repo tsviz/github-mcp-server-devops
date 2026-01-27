@@ -1,13 +1,15 @@
-import { App, Octokit } from '@octokit/app';
+import { App } from '@octokit/app';
+import { Octokit } from '@octokit/rest';
 import { graphql } from '@octokit/graphql';
-import { subHours, subDays, format } from 'date-fns';
+import { subHours, subDays } from 'date-fns';
 
 export class GitHubEnterpriseClient {
   private app: App;
-  private octokit: Octokit;
+  private octokit!: Octokit;
   private graphqlClient: typeof graphql;
   private enterpriseSlug: string;
   private isEnterpriseServer: boolean;
+  private installationId: number;
 
   constructor(config: {
     appId: string;
@@ -18,6 +20,7 @@ export class GitHubEnterpriseClient {
   }) {
     this.enterpriseSlug = config.enterpriseSlug;
     this.isEnterpriseServer = config.enterpriseUrl !== 'https://api.github.com';
+    this.installationId = parseInt(config.installationId);
     
     this.app = new App({
       appId: config.appId,
@@ -25,15 +28,21 @@ export class GitHubEnterpriseClient {
       ...(this.isEnterpriseServer && { baseUrl: config.enterpriseUrl }),
     });
     
-    this.octokit = this.app.getInstallationOctokit(parseInt(config.installationId));
+    // Initialize octokit asynchronously
+    this.initOctokit();
     
     // Initialize GraphQL client for advanced queries
     this.graphqlClient = graphql.defaults({
       headers: {
-        authorization: `bearer ${this.octokit.auth}`,
+        authorization: `token ${process.env.GITHUB_TOKEN || ''}`,
       },
       ...(this.isEnterpriseServer && { baseUrl: config.enterpriseUrl + '/graphql' }),
     });
+  }
+
+  private async initOctokit(): Promise<void> {
+    const installationOctokit = await this.app.getInstallationOctokit(this.installationId);
+    this.octokit = installationOctokit as unknown as Octokit;
   }
 
   async verifyEnterpriseAccess(): Promise<boolean> {
@@ -127,7 +136,7 @@ export class GitHubEnterpriseClient {
       billing: billingData,
       workflowBilling,
       runnerMinutes,
-      detailedMetrics: detailedMetrics.organization,
+      detailedMetrics: (detailedMetrics as Record<string, unknown>).organization,
       storage: storageMetrics,
       timeframe,
       breakdown,
@@ -225,12 +234,12 @@ export class GitHubEnterpriseClient {
       );
       
       return {
-        ...performanceData.organization,
+        ...(performanceData as Record<string, unknown>).organization as Record<string, unknown>,
         workflowJobMetrics: jobMetrics,
       };
     }
     
-    return performanceData.organization;
+    return (performanceData as Record<string, unknown>).organization;
   }
 
   async getRunnerUtilization(
@@ -303,15 +312,15 @@ export class GitHubEnterpriseClient {
     return {
       selfHostedRunners: runnerType !== 'github-hosted' ? selfHostedRunners : null,
       runnerGroups,
-      metrics: runnerMetrics.organization,
+      metrics: (runnerMetrics as Record<string, unknown>).organization,
       runnerType,
     };
   }
 
   async getActionsCacheMetrics(
     orgName: string,
-    repoName?: string,
-    timeframe: string
+    repoName: string | undefined,
+    timeframe: string = '24h'
   ): Promise<any> {
     const since = this.getTimeframeCutoff(timeframe);
     
@@ -362,7 +371,7 @@ export class GitHubEnterpriseClient {
       return {
         organizationUsage: cacheUsage,
         repositoryUsage: repoCacheUsage,
-        analytics: cacheAnalytics.repository.cacheAnalytics,
+        analytics: ((cacheAnalytics as Record<string, unknown>).repository as Record<string, unknown>).cacheAnalytics,
       };
     }
     
@@ -461,13 +470,13 @@ export class GitHubEnterpriseClient {
       workflow: workflowName,
     });
     
-    return insights.repository.workflow;
+    return ((insights as Record<string, unknown>).repository as Record<string, unknown>).workflow;
   }
 
   async getTeamProductivityMetrics(
     orgName: string,
-    teamSlug?: string,
-    timeframe: string
+    teamSlug: string | undefined,
+    timeframe: string = '7d'
   ): Promise<any> {
     const since = this.getTimeframeCutoff(timeframe);
     
@@ -516,7 +525,7 @@ export class GitHubEnterpriseClient {
       since: since.toISOString(),
     });
     
-    return teamMetrics.organization;
+    return (teamMetrics as Record<string, unknown>).organization;
   }
 
   async getComplianceAuditData(
@@ -584,7 +593,7 @@ export class GitHubEnterpriseClient {
     return {
       auditLog,
       securityData,
-      complianceMetrics: complianceMetrics.organization,
+      complianceMetrics: (complianceMetrics as Record<string, unknown>).organization,
     };
   }
 

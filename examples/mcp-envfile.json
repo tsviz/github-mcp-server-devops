@@ -1,0 +1,15 @@
+{
+    "servers": {
+        "devops-observer": {
+            "command": "docker",
+            "args": [
+                "run", "-i", "--rm",
+                "--env-file", "/path/to/.devops-observer.env",
+                "-v", "/path/to/your/config:/app/config:ro",
+                "-v", "/path/to/your/reports:/app/reports:rw",
+                "ghcr.io/tsviz/actions-pulse:latest"
+            ],
+            "type": "stdio"
+        }
+    }
+}

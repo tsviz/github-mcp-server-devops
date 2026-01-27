@@ -1,0 +1,41 @@
+# Build outputs
+dist/
+build/
+
+# Dependencies
+node_modules/
+
+# Generated reports (local testing)
+reports/
+
+# Environment files with secrets
+.env
+.env.local
+.env.*.local
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+npm-debug.log*
+
+# TypeScript cache
+*.tsbuildinfo
+
+# Coverage
+coverage/
+
+# Local MCP server examples (separate repos)
+arc-config-mcp-example/
+actions-runner-telemetry-example/
+
+# Docker
+*.tar

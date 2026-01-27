@@ -1,0 +1,18 @@
+{
+    "servers": {
+        "devops-observer": {
+            "command": "node",
+            "args": [
+                "build/index.js"
+            ],
+            "cwd": "/path/to/actions-pulse",
+            "env": {
+                "GITHUB_TOKEN": "ghp_your_personal_access_token_here",
+                "GITHUB_ORG": "your-organization",
+                "DEVOPS_CONFIG_PATH": "./config",
+                "LOG_LEVEL": "debug"
+            },
+            "type": "stdio"
+        }
+    }
+}

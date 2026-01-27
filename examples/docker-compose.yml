@@ -1,0 +1,112 @@
+# Docker Compose for ActionsPulse MCP Server
+# Use this for standalone deployment or local development
+
+version: '3.8'
+
+services:
+  # =============================================================================
+  # DEVOPS OBSERVER MCP SERVER
+  # =============================================================================
+  devops-observer:
+    image: ghcr.io/tsviz/actions-pulse:latest
+    container_name: devops-observer
+    
+    # Environment configuration
+    environment:
+      # GitHub settings (required)
+      - GITHUB_TOKEN=${GITHUB_TOKEN}
+      - GITHUB_ORG=${GITHUB_ORG:-your-organization}
+      
+      # Server configuration
+      - DEVOPS_CONFIG_PATH=/app/config
+      - LOG_LEVEL=${LOG_LEVEL:-info}
+      - ENABLE_METRICS=${ENABLE_METRICS:-true}
+      
+      # Cache settings
+      - CACHE_TTL_SECONDS=${CACHE_TTL_SECONDS:-300}
+    
+    # Volume mounts
+    volumes:
+      # Configuration directory (read-only)
+      - ./config:/app/config:ro
+      
+      # Reports output directory (read-write)
+      - ./reports:/app/reports:rw
+    
+    # Restart policy
+    restart: unless-stopped
+    
+    # Health check
+    healthcheck:
+      test: ["CMD", "node", "-e", "console.log('healthy')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+    
+    # Resource limits
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 512M
+        reservations:
+          cpus: '0.25'
+          memory: 128M
+
+  # =============================================================================
+  # OPTIONAL: PROMETHEUS (for metrics collection)
+  # =============================================================================
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: devops-prometheus
+    profiles:
+      - monitoring    # Only starts with: docker compose --profile monitoring up
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.enable-lifecycle'
+    restart: unless-stopped
+
+  # =============================================================================
+  # OPTIONAL: GRAFANA (for dashboards)
+  # =============================================================================
+  grafana:
+    image: grafana/grafana:latest
+    container_name: devops-grafana
+    profiles:
+      - monitoring    # Only starts with: docker compose --profile monitoring up
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_USER=${GRAFANA_ADMIN_USER:-admin}
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_ADMIN_PASSWORD:-admin}
+      - GF_USERS_ALLOW_SIGN_UP=false
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+    depends_on:
+      - prometheus
+    restart: unless-stopped
+
+# =============================================================================
+# VOLUMES
+# =============================================================================
+volumes:
+  prometheus_data:
+    driver: local
+  grafana_data:
+    driver: local
+
+# =============================================================================
+# NETWORKS
+# =============================================================================
+networks:
+  default:
+    name: devops-observer-network
+    driver: bridge

@@ -13,7 +13,9 @@ on:
 
 env:
   REGISTRY: ghcr.io
-  IMAGE_NAME: ${{ github.repository }}
+  # Use explicit image name for ActionsPulse branding
+  # Change to ${{ github.repository }} if you rename the GitHub repo to 'actions-pulse'
+  IMAGE_NAME: tsviz/actions-pulse
 
 jobs:
   build-and-push:
@@ -22,6 +24,7 @@ jobs:
       contents: read
       packages: write
       id-token: write
+      attestations: write
 
     steps:
       - name: Checkout repository
@@ -29,6 +32,10 @@ jobs:
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
+
+      - name: Install cosign
+        if: github.event_name != 'pull_request'
+        uses: sigstore/cosign-installer@v3
 
       - name: Log in to GitHub Container Registry
         if: github.event_name != 'pull_request'
@@ -53,6 +60,7 @@ jobs:
             type=sha,prefix={{branch}}-,enable=${{ github.event_name != 'pull_request' }}
 
       - name: Build and push Docker image
+        id: build-push
         uses: docker/build-push-action@v5
         with:
           context: .
@@ -66,23 +74,9 @@ jobs:
             VERSION=${{ github.ref_name }}
             COMMIT_SHA=${{ github.sha }}
 
-      - name: Generate SBOM
-        if: github.event_name != 'pull_request'
-        uses: anchore/sbom-action@v0
-        with:
-          image: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.meta.outputs.version }}
-          output-file: sbom.spdx.json
-
       - name: Sign the container image
-        if: github.event_name != 'pull_request'
+        if: github.event_name != 'pull_request' && steps.build-push.outputs.digest != ''
         env:
-          COSIGN_EXPERIMENTAL: 1
+          DIGEST: ${{ steps.build-push.outputs.digest }}
         run: |
-          cosign sign --yes ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@${{ steps.meta.outputs.digest }}
-
-      - name: Upload SBOM
-        if: github.event_name != 'pull_request'
-        uses: actions/upload-artifact@v4
-        with:
-          name: sbom
-          path: sbom.spdx.json
+          cosign sign --yes ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@${DIGEST}

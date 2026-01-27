@@ -1,0 +1,27 @@
+# ActionsPulse Configuration
+# Central configuration for the devops-observer MCP server
+
+version: "1.0.0"
+
+organization:
+  name: Octodemo
+  github_org: octodemo
+  environments:
+    - DEV
+    - STAGE
+    - PROD
+  compliance:
+    - SOC2
+
+# Path configurations
+paths:
+  policies: policies/
+  repositories: repositories/
+  workflows: workflows/
+  dashboards: dashboards/
+
+# Default enforcement settings
+defaults:
+  enforcement: advisory
+  autoFix: false
+  notifyOnViolation: true

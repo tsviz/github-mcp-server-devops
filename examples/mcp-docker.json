@@ -1,0 +1,17 @@
+{
+    "servers": {
+        "devops-observer": {
+            "command": "docker",
+            "args": [
+                "run", "-i", "--rm",
+                "-e", "GITHUB_TOKEN=ghp_your_personal_access_token_here",
+                "-e", "GITHUB_ORG=your-organization",
+                "-e", "DEVOPS_CONFIG_PATH=/app/config",
+                "-v", "/path/to/your/config:/app/config:ro",
+                "-v", "/path/to/your/reports:/app/reports:rw",
+                "ghcr.io/tsviz/actions-pulse:latest"
+            ],
+            "type": "stdio"
+        }
+    }
+}

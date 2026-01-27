@@ -1,0 +1,134 @@
+# Repository Inventory Example
+# This file defines which repositories ActionsPulse monitors and analyzes
+# Place in: config/repositories/inventory.yaml
+
+apiVersion: devops-observer/v1
+kind: RepositoryInventory
+metadata:
+  name: example-inventory
+  version: "1.0.0"
+  description: "Example repository inventory for ActionsPulse"
+
+spec:
+  # =============================================================================
+  # DISCOVERY SETTINGS
+  # =============================================================================
+  # Auto-discovery of repositories in your organization
+  # Set enabled: true to automatically find repositories
+  discovery:
+    enabled: false              # Manual configuration preferred
+    includeArchived: false      # Exclude archived repos
+    includeForked: false        # Exclude forked repos
+    excludePatterns:            # Patterns to exclude from discovery
+      - "*-archived"
+      - "legacy-*"
+      - "test-*"
+      - ".github"
+
+  # =============================================================================
+  # REPOSITORY DEFINITIONS
+  # =============================================================================
+  # Explicitly define which repositories to monitor
+  repositories:
+    # Tier-1: Production-critical applications
+    - name: api-gateway
+      team: platform-engineering
+      tier: tier-1               # Critical - 99.9% uptime SLA
+      compliance:
+        - SOC2
+        - HIPAA
+      owner: my-org              # Optional if using GITHUB_ORG env var
+      tags:
+        - java
+        - springboot
+        - production
+        - api
+
+    - name: auth-service
+      team: security
+      tier: tier-1
+      compliance:
+        - SOC2
+        - PCI-DSS
+      tags:
+        - go
+        - authentication
+        - production
+
+    # Tier-2: Internal tools and staging
+    - name: admin-dashboard
+      team: frontend
+      tier: tier-2               # Standard - 99% uptime SLA
+      compliance:
+        - SOC2
+      tags:
+        - react
+        - typescript
+        - internal
+
+    - name: data-pipeline
+      team: data-engineering
+      tier: tier-2
+      compliance:
+        - SOC2
+      tags:
+        - python
+        - airflow
+        - etl
+
+    # Tier-3: Development and experimental
+    - name: feature-experiments
+      team: innovation
+      tier: tier-3               # Low priority - best effort
+      tags:
+        - experimental
+        - development
+
+  # =============================================================================
+  # REPOSITORY GROUPS
+  # =============================================================================
+  # Group repositories for bulk configuration and reporting
+  groups:
+    # Production services group
+    production:
+      repositories:
+        - api-gateway
+        - auth-service
+      tier: tier-1
+      team: platform-engineering
+      compliance:
+        - SOC2
+        - HIPAA
+
+    # Internal tools group
+    internal:
+      repositories:
+        - admin-dashboard
+        - data-pipeline
+      tier: tier-2
+      team: internal-tools
+
+    # All Java applications
+    java-apps:
+      repositories:
+        - api-gateway
+      tags:
+        - java
+
+# =============================================================================
+# TIER REFERENCE
+# =============================================================================
+# tier-1: 🔴 Critical
+#   - 99.9% uptime SLA
+#   - < 15 minute response time
+#   - Production, revenue-critical systems
+#
+# tier-2: 🟡 Standard  
+#   - 99% uptime SLA
+#   - < 1 hour response time
+#   - Internal tools, staging environments
+#
+# tier-3: 🟢 Low Priority
+#   - Best effort uptime
+#   - < 24 hour response time
+#   - Development, experimental projects
