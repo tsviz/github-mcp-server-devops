@@ -2,8 +2,8 @@
 
 <div align="center">
 
-[![Docker Image](https://github.com/tsviz/actions-pulse/actions/workflows/build-and-publish.yml/badge.svg)](https://github.com/tsviz/actions-pulse/actions/workflows/build-and-publish.yml)
-[![Container Registry](https://img.shields.io/badge/ghcr.io-tsviz%2Factions--pulse-blue)](https://github.com/tsviz/actions-pulse/pkgs/container/actions-pulse)
+[![Docker Image](https://github.com/tsviz/github-mcp-server-devops/actions/workflows/build-and-publish.yml/badge.svg)](https://github.com/tsviz/github-mcp-server-devops/actions/workflows/build-and-publish.yml)
+[![Container Registry](https://img.shields.io/badge/ghcr.io-tsviz%2Factions--pulse-blue)](https://github.com/tsviz/github-mcp-server-devops/pkgs/container/actions-pulse)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
 **Real-time GitHub Actions observability through VS Code with GitHub Copilot**
