@@ -23,7 +23,11 @@ FROM node:22-alpine AS production
 ARG VERSION=dev
 ARG COMMIT_SHA=unknown
 LABEL org.opencontainers.image.version="${VERSION}" \
-      org.opencontainers.image.revision="${COMMIT_SHA}"
+      org.opencontainers.image.revision="${COMMIT_SHA}" \
+      org.opencontainers.image.title="ActionsPulse" \
+      org.opencontainers.image.description="Real-time GitHub Actions observability MCP server" \
+      org.opencontainers.image.source="https://github.com/tsviz/github-mcp-server-devops" \
+      io.modelcontextprotocol.server.name="io.github.tsviz/actions-pulse"
 
 WORKDIR /app
 

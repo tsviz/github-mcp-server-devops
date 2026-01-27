@@ -1,0 +1,43 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.tsviz/actions-pulse",
+  "title": "ActionsPulse",
+  "description": "Real-time GitHub Actions observability: DORA Metrics, Cost Analysis, CI/CD Health dashboards.",
+  "repository": {
+    "url": "https://github.com/tsviz/github-mcp-server-devops",
+    "source": "github"
+  },
+  "version": "2.0.0",
+  "packages": [
+    {
+      "registryType": "oci",
+      "identifier": "ghcr.io/tsviz/actions-pulse:2.0.0",
+      "transport": {
+        "type": "stdio"
+      },
+      "environmentVariables": [
+        {
+          "name": "GITHUB_TOKEN",
+          "description": "GitHub Personal Access Token (fine-grained recommended) with read access to Actions, Administration, Deployments, Issues, Pull Requests",
+          "isRequired": true,
+          "format": "string",
+          "isSecret": true
+        },
+        {
+          "name": "GITHUB_ORG",
+          "description": "Target GitHub organization to monitor",
+          "isRequired": true,
+          "format": "string",
+          "isSecret": false
+        },
+        {
+          "name": "GITHUB_ENTERPRISE_SLUG",
+          "description": "Enterprise slug for enhanced cross-org features (optional)",
+          "isRequired": false,
+          "format": "string",
+          "isSecret": false
+        }
+      ]
+    }
+  ]
+}

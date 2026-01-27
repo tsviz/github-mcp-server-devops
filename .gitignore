@@ -38,4 +38,4 @@ arc-config-mcp-example/
 actions-runner-telemetry-example/
 
 # Docker
-*.tar
+*.tarmcp-publisher
