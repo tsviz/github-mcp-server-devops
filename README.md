@@ -146,21 +146,34 @@ Assess your DevOps maturity level:
 > # Ask Copilot in natural language:
 > "Generate DevOps reports for the last 30 days"
 > 
-> # Or invoke the tool directly with parameters:
-> generate_devops_reports(timeframe: "30d", reports: ["all"])
+> # Or invoke the tool directly:
+> #generate_devops_reports --timeframe 30d
 > ```
 > Reports are saved to timestamped folders as standalone HTML files — share them with your team or embed in internal wikis!
 
 ---
 
-## �🚀 Quick Start
+## 🚀 Quick Start
+
+### Install from MCP Registry
+
+ActionsPulse is published to the official [MCP Registry](https://registry.modelcontextprotocol.io/?q=io.github.tsviz%2Factions-pulse) as `io.github.tsviz/actions-pulse`.
+
+**🌐 Web UI (Recommended)** — Use the [MCP Registry UI](https://vemonet.github.io/mcp-registry/?search=actions-pulse) for 1-click installation into VS Code or Cursor:
+
+1. Go to [vemonet.github.io/mcp-registry](https://vemonet.github.io/mcp-registry/?search=actions-pulse)
+2. Search for "actions-pulse"
+3. Click **Install** → Select your client (VS Code, Cursor)
+4. Configure environment variables when prompted
+
+**Manual Docker Setup** — Or follow the steps below to configure manually.
 
 ### Prerequisites
 - ✅ Docker installed
 - ✅ GitHub Personal Access Token (fine-grained recommended)
 - ✅ VS Code with GitHub Copilot
 
-### 1. Create a Fine-Grained Personal Access Token
+### 1. Create a [Fine-Grained](https://docs.github.com/en/enterprise-cloud@latest/authentication/keeping-your-account-and-data-secure/managing-your-personal-access-tokens#fine-grained-personal-access-tokens) Personal Access Token
 
 1. Go to [GitHub Settings → Developer Settings → Personal Access Tokens → Fine-grained tokens](https://github.com/settings/tokens?type=beta)
 2. Click **Generate new token**
@@ -272,15 +285,31 @@ Add to VS Code's MCP settings (`~/.vscode/mcp.json` or workspace `.vscode/mcp.js
 |----------|----------|-------------|
 | `GITHUB_TOKEN` | ✅ Yes | Personal Access Token (fine-grained recommended) |
 | `GITHUB_ORG` | ✅ Yes | Target GitHub organization to monitor (e.g., `my-company`). All API calls use this org. |
+| `DEFAULT_REPO_FILTER` | ❌ No | Comma-separated list of repos to monitor (e.g., `my-app,my-api`). See [precedence rules](#repo-filter-precedence) below. |
 | `GITHUB_API_URL` | ❌ No | Custom API URL (default: `https://api.github.com`) |
 | `GITHUB_ENTERPRISE_SLUG` | ❌ No | Enterprise slug for enhanced features |
 | `GITHUB_ENTERPRISE_URL` | ❌ No | GitHub Enterprise Server API URL |
 | `DEVOPS_CONFIG_REPO` | ❌ No | Config repo name (default: `devops-config`) |
 | `DEVOPS_CONFIG_PATH` | ❌ No | Local path to config files (for mounted configs) |
 
+#### Repo Filter Precedence
+
+When determining which repositories to query, ActionsPulse uses this precedence (highest to lowest):
+
+| Priority | Source | Applies To | Example |
+|----------|--------|------------|---------|
+| 1️⃣ | `repo_filter` parameter in tool call | Individual tools | `get_dora_metrics(repo_filter: "app1,app2")` |
+| 2️⃣ | `inventory.yaml` repositories | `generate_devops_reports` | Repos defined in config file |
+| 3️⃣ | `DEFAULT_REPO_FILTER` env var | All tools (fallback) | `DEFAULT_REPO_FILTER=my-app,my-api` |
+| 4️⃣ | All org repos via GitHub API | All tools | *(default if nothing set)* |
+
+**Tip:** For quick setup without a config repo, just set `DEFAULT_REPO_FILTER` in the MCP Registry installer. For richer metadata (team, tier, compliance tags), use `inventory.yaml`.
+
 ### 4. Configuration Files (Optional)
 
-You can configure which repositories to monitor and define policies using configuration files. There are two approaches:
+**By default, ActionsPulse queries ALL repositories in your organization via the GitHub API** — no configuration files are required. You can filter repos dynamically using tool parameters like `repo_filter`.
+
+The optional configuration files let you define persistent metadata (teams, tiers, compliance tags) for filtering and reporting. There are two approaches:
 
 #### Option A: Remote Config Repository (Recommended for Teams)
 

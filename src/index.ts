@@ -85,6 +85,20 @@ const enterpriseConfig = {
 // Default organization (can be overridden in tool calls)
 const defaultOrg = process.env.GITHUB_ORG;
 
+// Default repository filter (comma-separated list of repos to monitor)
+// PRECEDENCE for repo filtering:
+//   1. Explicit `repo_filter` parameter in tool call (highest priority)
+//   2. DEFAULT_REPO_FILTER env var (if set)
+//   3. All org repos (if neither is set)
+// 
+// NOTE: The inventory.yaml file is ONLY used for:
+//   - `list_monitored_repositories` tool (metadata queries)
+//   - `generate_devops_reports` tool (report generation)
+// It does NOT affect individual metric tools like get_dora_metrics.
+const defaultRepoFilter = process.env.DEFAULT_REPO_FILTER
+  ? process.env.DEFAULT_REPO_FILTER.split(',').map(r => r.trim())
+  : undefined;
+
 // Config repo settings
 const configRepoSettings = {
   configRepo: process.env.DEVOPS_CONFIG_REPO || 'devops-config',
@@ -640,7 +654,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       case 'get_detailed_usage_metrics': {
         const repoFilter = (args as any).repo_filter
           ? (args as any).repo_filter.split(',').map((r: string) => r.trim())
-          : undefined;
+          : defaultRepoFilter;
 
         const usageData = await githubClient.getDetailedUsageMetrics(
           getOrgName(args),
@@ -660,7 +674,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       case 'get_detailed_performance_metrics': {
         const repoFilter = (args as any).repo_filter
           ? (args as any).repo_filter.split(',').map((r: string) => r.trim())
-          : undefined;
+          : defaultRepoFilter;
 
         const perfData = await githubClient.getDetailedPerformanceMetrics(
           getOrgName(args),
@@ -813,7 +827,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       case 'get_dora_metrics': {
         const repoFilter = (args as any).repo_filter 
           ? (args as any).repo_filter.split(',').map((r: string) => r.trim()) 
-          : undefined;
+          : defaultRepoFilter;
         
         const doraData = await githubClient.getDoraMetrics(
           getOrgName(args),
@@ -866,7 +880,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       case 'get_deployment_metrics': {
         const repoFilter = (args as any).repo_filter
           ? (args as any).repo_filter.split(',').map((r: string) => r.trim())
-          : undefined;
+          : defaultRepoFilter;
         
         const deploymentData = await githubClient.getDeploymentMetrics(
           getOrgName(args),
@@ -887,7 +901,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       case 'get_environment_metrics': {
         const repoFilter = (args as any).repo_filter
           ? (args as any).repo_filter.split(',').map((r: string) => r.trim())
-          : undefined;
+          : defaultRepoFilter;
 
         const envData = await githubClient.getEnvironmentMetrics(
           getOrgName(args),
@@ -938,7 +952,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       case 'get_enhanced_dora_metrics': {
         const repoFilter = (args as any).repo_filter
           ? (args as any).repo_filter.split(',').map((r: string) => r.trim())
-          : undefined;
+          : defaultRepoFilter;
 
         const doraData = await githubClient.getEnhancedDoraMetrics(
           getOrgName(args),
@@ -1312,9 +1326,13 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           }
         }
         
+        // Repo filter precedence for generate_devops_reports:
+        // 1. inventory.yaml repos (if configured)
+        // 2. DEFAULT_REPO_FILTER env var (fallback)
+        // 3. All org repos (if neither is set)
         const repoFilter = monitoredRepos.length > 0 
           ? monitoredRepos.map((r: any) => r.name).join(',')
-          : undefined;
+          : defaultRepoFilter?.join(',');
         
         const timeframeLabel = timeframe === '7d' ? '7 days' : timeframe === '30d' ? '30 days' : '90 days';
         const timeframeDays = timeframe === '7d' ? 7 : timeframe === '30d' ? 30 : 90;

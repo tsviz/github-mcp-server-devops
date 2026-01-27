@@ -36,6 +36,13 @@
           "isRequired": false,
           "format": "string",
           "isSecret": false
+        },
+        {
+          "name": "DEFAULT_REPO_FILTER",
+          "description": "Comma-separated list of repository names to monitor (e.g., 'my-app,my-api,frontend'). If not set, all org repos are queried.",
+          "isRequired": false,
+          "format": "string",
+          "isSecret": false
         }
       ]
     }
