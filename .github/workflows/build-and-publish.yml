@@ -223,7 +223,8 @@ jobs:
       - name: 🔧 Update server.json version
         run: |
           VERSION=${GITHUB_REF#refs/tags/v}
-          jq --arg v "$VERSION" '.version = $v | .packages[0].identifier = "ghcr.io/tsviz/actions-pulse:" + $v' server.json > server.tmp && mv server.tmp server.json
+          TAG=${GITHUB_REF#refs/tags/}
+          jq --arg v "$VERSION" --arg tag "$TAG" '.version = $v | .packages[0].identifier = "ghcr.io/tsviz/actions-pulse:" + $tag' server.json > server.tmp && mv server.tmp server.json
           cat server.json
 
       - name: 📥 Install mcp-publisher
