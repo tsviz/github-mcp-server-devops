@@ -2,6 +2,7 @@
 
 <div align="center">
 
+[![Available on MCP Registry](https://img.shields.io/badge/MCP-Available_on_Registry-00DC82?style=flat&logo=data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIyNCIgaGVpZ2h0PSIyNCIgdmlld0JveD0iMCAwIDI0IDI0IiBmaWxsPSJub25lIiBzdHJva2U9IndoaXRlIiBzdHJva2Utd2lkdGg9IjIiIHN0cm9rZS1saW5lY2FwPSJyb3VuZCIgc3Ryb2tlLWxpbmVqb2luPSJyb3VuZCI+PHBhdGggZD0iTTEyIDJhMTAgMTAgMCAxIDAgMTAgMTBIMTJWMloiLz48cGF0aCBkPSJNMjEuMTggOC4wMmMtMS0yLjMtMi44NS00LjE1LTUuMTUtNS4xNSIvPjwvc3ZnPg==)](https://registry.modelcontextprotocol.io/?q=io.github.tsviz%2Factions-pulse)
 [![Docker Image](https://github.com/tsviz/github-mcp-server-devops/actions/workflows/build-and-publish.yml/badge.svg)](https://github.com/tsviz/github-mcp-server-devops/actions/workflows/build-and-publish.yml)
 [![Container Registry](https://img.shields.io/badge/ghcr.io-tsviz%2Factions--pulse-blue)](https://github.com/tsviz/github-mcp-server-devops/pkgs/container/actions-pulse)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
