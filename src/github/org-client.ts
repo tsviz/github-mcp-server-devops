@@ -2793,5 +2793,779 @@ export class GitHubOrgClient {
         .map((r: any) => r.repo),
     };
   }
+
+  /**
+   * Fetch workflow file content from a repository
+   */
+  async getWorkflowFileContent(
+    org: string,
+    repo: string,
+    workflowPath?: string
+  ): Promise<{
+    workflows: Array<{
+      name: string;
+      path: string;
+      content: string;
+      sha: string;
+    }>;
+    repo: string;
+    error?: string;
+  }> {
+    const workflows: Array<{
+      name: string;
+      path: string;
+      content: string;
+      sha: string;
+    }> = [];
+
+    try {
+      // If a specific path is provided, fetch just that file
+      if (workflowPath) {
+        const { data } = await this.octokit.rest.repos.getContent({
+          owner: org,
+          repo,
+          path: workflowPath,
+        });
+
+        if ('content' in data && data.type === 'file') {
+          const content = Buffer.from(data.content, 'base64').toString('utf-8');
+          workflows.push({
+            name: data.name,
+            path: data.path,
+            content,
+            sha: data.sha,
+          });
+        }
+      } else {
+        // List all workflows in .github/workflows
+        try {
+          const { data: files } = await this.octokit.rest.repos.getContent({
+            owner: org,
+            repo,
+            path: '.github/workflows',
+          });
+
+          if (Array.isArray(files)) {
+            // Fetch content for each workflow file (limit to 10 to avoid rate limits)
+            const yamlFiles = files
+              .filter(f => f.type === 'file' && (f.name.endsWith('.yml') || f.name.endsWith('.yaml')))
+              .slice(0, 10);
+
+            for (const file of yamlFiles) {
+              try {
+                const { data } = await this.octokit.rest.repos.getContent({
+                  owner: org,
+                  repo,
+                  path: file.path,
+                });
+
+                if ('content' in data && data.type === 'file') {
+                  const content = Buffer.from(data.content, 'base64').toString('utf-8');
+                  workflows.push({
+                    name: data.name,
+                    path: data.path,
+                    content,
+                    sha: data.sha,
+                  });
+                }
+              } catch {
+                // Skip files we can't read
+              }
+            }
+          }
+        } catch {
+          return {
+            workflows: [],
+            repo,
+            error: 'No .github/workflows directory found',
+          };
+        }
+      }
+
+      return { workflows, repo };
+    } catch (error: any) {
+      return {
+        workflows: [],
+        repo,
+        error: error.message || 'Failed to fetch workflow files',
+      };
+    }
+  }
+
+  /**
+   * Analyze workflow file content for optimization opportunities
+   */
+  analyzeWorkflowContent(content: string, fileName: string): {
+    name: string;
+    triggers: string[];
+    jobs: Array<{
+      name: string;
+      runsOn: string;
+      steps: number;
+      hasCache: boolean;
+      hasConcurrency: boolean;
+      hasTimeout: boolean;
+      hasMatrix: boolean;
+      uses: string[];
+    }>;
+    issues: Array<{
+      severity: 'high' | 'medium' | 'low';
+      category: string;
+      message: string;
+      line?: number;
+      suggestion?: string;
+    }>;
+    optimizations: Array<{
+      type: string;
+      description: string;
+      impact: 'high' | 'medium' | 'low';
+      codeExample?: string;
+    }>;
+  } {
+    const issues: Array<{
+      severity: 'high' | 'medium' | 'low';
+      category: string;
+      message: string;
+      line?: number;
+      suggestion?: string;
+    }> = [];
+
+    const optimizations: Array<{
+      type: string;
+      description: string;
+      impact: 'high' | 'medium' | 'low';
+      codeExample?: string;
+    }> = [];
+
+    // Parse YAML basics (simple regex-based analysis)
+    const lines = content.split('\n');
+    
+    // Extract workflow name
+    const nameMatch = content.match(/^name:\s*(.+)$/m);
+    const workflowName = nameMatch ? nameMatch[1].trim().replace(/['"]/g, '') : fileName;
+
+    // Extract triggers
+    const triggers: string[] = [];
+    const onMatch = content.match(/^on:\s*$/m) || content.match(/^on:\s*\[.+\]/m) || content.match(/^on:\s*\w+/m);
+    if (onMatch) {
+      // Simple trigger detection
+      if (content.includes('push:')) triggers.push('push');
+      if (content.includes('pull_request:') || content.includes('pull_request_target:')) triggers.push('pull_request');
+      if (content.includes('schedule:')) triggers.push('schedule');
+      if (content.includes('workflow_dispatch:')) triggers.push('workflow_dispatch');
+      if (content.includes('workflow_call:')) triggers.push('workflow_call');
+      if (content.includes('release:')) triggers.push('release');
+    }
+
+    // Extract jobs
+    const jobs: Array<{
+      name: string;
+      runsOn: string;
+      steps: number;
+      hasCache: boolean;
+      hasConcurrency: boolean;
+      hasTimeout: boolean;
+      hasMatrix: boolean;
+      uses: string[];
+    }> = [];
+
+    // Simple job detection
+    const jobMatches = content.matchAll(/^\s{2}(\w+[-\w]*):\s*$/gm);
+    let inJobs = false;
+    let currentJobIndent = -1;
+
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i];
+      
+      if (line.match(/^jobs:\s*$/)) {
+        inJobs = true;
+        continue;
+      }
+
+      if (inJobs && line.match(/^\s{2}[\w-]+:\s*$/)) {
+        const jobName = line.trim().replace(':', '');
+        
+        // Look ahead to extract job details
+        let runsOn = 'unknown';
+        let stepCount = 0;
+        let hasCache = false;
+        let hasConcurrency = false;
+        let hasTimeout = false;
+        let hasMatrix = false;
+        const uses: string[] = [];
+
+        for (let j = i + 1; j < lines.length && j < i + 100; j++) {
+          const jobLine = lines[j];
+          
+          // Check if we've exited this job (new job at same indent)
+          if (jobLine.match(/^\s{2}[\w-]+:\s*$/) && j !== i) break;
+          
+          // runs-on
+          const runsOnMatch = jobLine.match(/runs-on:\s*(.+)/);
+          if (runsOnMatch) runsOn = runsOnMatch[1].trim();
+          
+          // steps count
+          if (jobLine.match(/^\s{6,8}-\s+(name:|uses:|run:)/)) stepCount++;
+          
+          // cache detection
+          if (jobLine.includes('actions/cache@') || jobLine.includes('cache:')) hasCache = true;
+          
+          // concurrency
+          if (jobLine.includes('concurrency:')) hasConcurrency = true;
+          
+          // timeout
+          if (jobLine.includes('timeout-minutes:')) hasTimeout = true;
+          
+          // matrix
+          if (jobLine.includes('matrix:')) hasMatrix = true;
+          
+          // uses actions
+          const usesMatch = jobLine.match(/uses:\s*(.+)/);
+          if (usesMatch) uses.push(usesMatch[1].trim());
+        }
+
+        jobs.push({
+          name: jobName,
+          runsOn,
+          steps: stepCount || 1,
+          hasCache,
+          hasConcurrency,
+          hasTimeout,
+          hasMatrix,
+          uses,
+        });
+      }
+    }
+
+    // Analyze for issues and optimizations
+    
+    // Check for missing caching
+    const hasNodeSetup = content.includes('actions/setup-node');
+    const hasPythonSetup = content.includes('actions/setup-python');
+    const hasJavaSetup = content.includes('actions/setup-java');
+    const hasGoSetup = content.includes('actions/setup-go');
+    const hasAnyCache = content.includes('actions/cache@') || content.includes('cache:');
+    
+    if ((hasNodeSetup || hasPythonSetup || hasJavaSetup || hasGoSetup) && !hasAnyCache) {
+      issues.push({
+        severity: 'high',
+        category: 'performance',
+        message: 'No caching configured for package dependencies',
+        suggestion: 'Add caching to reduce workflow run time significantly',
+      });
+      
+      if (hasNodeSetup) {
+        optimizations.push({
+          type: 'caching',
+          description: 'Add npm/yarn/pnpm caching using setup-node cache option',
+          impact: 'high',
+          codeExample: `- uses: actions/setup-node@v4
+  with:
+    node-version: '20'
+    cache: 'npm'  # or 'yarn' or 'pnpm'`,
+        });
+      }
+      
+      if (hasPythonSetup) {
+        optimizations.push({
+          type: 'caching',
+          description: 'Add pip caching using setup-python cache option',
+          impact: 'high',
+          codeExample: `- uses: actions/setup-python@v5
+  with:
+    python-version: '3.12'
+    cache: 'pip'`,
+        });
+      }
+    }
+
+    // Check for missing concurrency
+    if (!content.includes('concurrency:') && (triggers.includes('push') || triggers.includes('pull_request'))) {
+      issues.push({
+        severity: 'medium',
+        category: 'efficiency',
+        message: 'No concurrency control - parallel runs may waste resources',
+        suggestion: 'Add concurrency group to cancel outdated runs',
+      });
+      
+      optimizations.push({
+        type: 'concurrency',
+        description: 'Add concurrency group to cancel in-progress runs when new commits are pushed',
+        impact: 'medium',
+        codeExample: `concurrency:
+  group: \${{ github.workflow }}-\${{ github.ref }}
+  cancel-in-progress: true`,
+      });
+    }
+
+    // Check for missing timeout
+    const jobsWithoutTimeout = jobs.filter(j => !j.hasTimeout);
+    if (jobsWithoutTimeout.length > 0) {
+      issues.push({
+        severity: 'low',
+        category: 'reliability',
+        message: `${jobsWithoutTimeout.length} job(s) without timeout-minutes`,
+        suggestion: 'Add timeout-minutes to prevent runaway jobs',
+      });
+      
+      optimizations.push({
+        type: 'timeout',
+        description: 'Add timeout-minutes to prevent jobs from running indefinitely',
+        impact: 'low',
+        codeExample: `jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30  # Adjust based on expected duration`,
+      });
+    }
+
+    // Check for expensive runners
+    const macOSJobs = jobs.filter(j => j.runsOn.includes('macos'));
+    const windowsJobs = jobs.filter(j => j.runsOn.includes('windows'));
+    
+    if (macOSJobs.length > 0) {
+      issues.push({
+        severity: 'medium',
+        category: 'cost',
+        message: `${macOSJobs.length} job(s) use macOS runners (10x cost of Linux)`,
+        suggestion: 'Consider if macOS is required or if Linux would suffice',
+      });
+    }
+
+    // Check for outdated actions
+    const outdatedActions = [
+      { pattern: 'actions/checkout@v2', current: 'v4' },
+      { pattern: 'actions/checkout@v3', current: 'v4' },
+      { pattern: 'actions/setup-node@v2', current: 'v4' },
+      { pattern: 'actions/setup-node@v3', current: 'v4' },
+      { pattern: 'actions/setup-python@v3', current: 'v5' },
+      { pattern: 'actions/setup-python@v4', current: 'v5' },
+      { pattern: 'actions/cache@v2', current: 'v4' },
+      { pattern: 'actions/cache@v3', current: 'v4' },
+    ];
+
+    for (const { pattern, current } of outdatedActions) {
+      if (content.includes(pattern)) {
+        issues.push({
+          severity: 'low',
+          category: 'maintenance',
+          message: `Outdated action: ${pattern} (latest: ${current})`,
+          suggestion: `Update to ${pattern.split('@')[0]}@${current}`,
+        });
+      }
+    }
+
+    // Check for hardcoded secrets in env
+    if (content.match(/\bpassword\s*[:=]\s*['"][^$]/i) || 
+        content.match(/\btoken\s*[:=]\s*['"][^$]/i) ||
+        content.match(/\bkey\s*[:=]\s*['"][^$]/i)) {
+      issues.push({
+        severity: 'high',
+        category: 'security',
+        message: 'Possible hardcoded secret detected',
+        suggestion: 'Use GitHub secrets: ${{ secrets.SECRET_NAME }}',
+      });
+    }
+
+    // Check for missing path filters on push/PR
+    if ((triggers.includes('push') || triggers.includes('pull_request')) &&
+        !content.includes('paths:') && !content.includes('paths-ignore:')) {
+      optimizations.push({
+        type: 'path-filter',
+        description: 'Add path filters to skip workflow when irrelevant files change',
+        impact: 'medium',
+        codeExample: `on:
+  push:
+    branches: [main]
+    paths:
+      - 'src/**'
+      - 'package*.json'
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'`,
+      });
+    }
+
+    // Check for opportunities to use composite actions
+    if (jobs.length > 2) {
+      const allUses = jobs.flatMap(j => j.uses);
+      const duplicateSteps = allUses.filter((u, i) => allUses.indexOf(u) !== i);
+      
+      if (duplicateSteps.length > 2) {
+        optimizations.push({
+          type: 'composite-action',
+          description: 'Consider extracting repeated steps into a reusable composite action',
+          impact: 'medium',
+        });
+      }
+    }
+
+    return {
+      name: workflowName,
+      triggers,
+      jobs,
+      issues,
+      optimizations,
+    };
+  }
+
+  /**
+   * Get recent failed workflow runs with error details for root cause analysis
+   */
+  async getWorkflowFailures(
+    org: string,
+    repo: string,
+    workflowName?: string,
+    limit: number = 5
+  ): Promise<{
+    failures: Array<{
+      id: number;
+      workflow: string;
+      conclusion: string;
+      createdAt: string;
+      headBranch: string;
+      headSha: string;
+      failedJobs: Array<{
+        name: string;
+        conclusion: string;
+        steps: Array<{
+          name: string;
+          conclusion: string;
+          number: number;
+        }>;
+        errorAnnotations: string[];
+      }>;
+      runUrl: string;
+    }>;
+    error?: string;
+  }> {
+    const failures: Array<{
+      id: number;
+      workflow: string;
+      conclusion: string;
+      createdAt: string;
+      headBranch: string;
+      headSha: string;
+      failedJobs: Array<{
+        name: string;
+        conclusion: string;
+        steps: Array<{
+          name: string;
+          conclusion: string;
+          number: number;
+        }>;
+        errorAnnotations: string[];
+      }>;
+      runUrl: string;
+    }> = [];
+
+    try {
+      // Get recent failed workflow runs
+      const { data: runs } = await this.octokit.rest.actions.listWorkflowRunsForRepo({
+        owner: org,
+        repo,
+        status: 'failure',
+        per_page: 30,
+      });
+
+      // Filter by workflow name if provided
+      let filteredRuns = runs.workflow_runs;
+      if (workflowName) {
+        filteredRuns = runs.workflow_runs.filter(
+          r => r.name?.toLowerCase().includes(workflowName.toLowerCase())
+        );
+      }
+
+      // Get job details for each failed run
+      for (const run of filteredRuns.slice(0, limit)) {
+        try {
+          const { data: jobs } = await this.octokit.rest.actions.listJobsForWorkflowRun({
+            owner: org,
+            repo,
+            run_id: run.id,
+          });
+
+          const failedJobs = jobs.jobs
+            .filter(j => j.conclusion === 'failure')
+            .map(job => ({
+              name: job.name,
+              conclusion: job.conclusion || 'unknown',
+              steps: (job.steps || [])
+                .filter(s => s.conclusion === 'failure')
+                .map(s => ({
+                  name: s.name,
+                  conclusion: s.conclusion || 'unknown',
+                  number: s.number,
+                })),
+              // Try to get error annotations from the run
+              errorAnnotations: [] as string[],
+            }));
+
+          // Try to get check run annotations (error messages)
+          for (const job of failedJobs) {
+            try {
+              const matchingJob = jobs.jobs.find(j => j.name === job.name);
+              if (matchingJob) {
+                const { data: annotations } = await this.octokit.rest.checks.listAnnotations({
+                  owner: org,
+                  repo,
+                  check_run_id: matchingJob.id,
+                  per_page: 10,
+                });
+                
+                job.errorAnnotations = annotations
+                  .filter(a => a.annotation_level === 'failure' || a.annotation_level === 'warning')
+                  .map(a => `${a.path || ''}:${a.start_line || ''} - ${a.message}`)
+                  .slice(0, 5);
+              }
+            } catch {
+              // Annotations not available
+            }
+          }
+
+          failures.push({
+            id: run.id,
+            workflow: run.name || 'Unknown',
+            conclusion: run.conclusion || 'failure',
+            createdAt: run.created_at,
+            headBranch: run.head_branch || 'unknown',
+            headSha: run.head_sha.slice(0, 7),
+            failedJobs,
+            runUrl: run.html_url,
+          });
+        } catch {
+          // Skip runs we can't get jobs for
+        }
+      }
+
+      return { failures };
+    } catch (error: any) {
+      return {
+        failures: [],
+        error: error.message || 'Failed to fetch workflow failures',
+      };
+    }
+  }
+
+  /**
+   * Analyze workflow failures to identify common error patterns
+   */
+  analyzeFailurePatterns(
+    failures: Array<{
+      workflow: string;
+      failedJobs: Array<{
+        name: string;
+        steps: Array<{ name: string; conclusion: string }>;
+        errorAnnotations: string[];
+      }>;
+    }>
+  ): {
+    patterns: Array<{
+      category: string;
+      count: number;
+      description: string;
+      examples: string[];
+      suggestedFix: string;
+    }>;
+    commonFailingSteps: Array<{ step: string; count: number }>;
+    summary: string;
+  } {
+    
+    const patterns: Map<string, {
+      category: string;
+      count: number;
+      description: string;
+      examples: string[];
+      suggestedFix: string;
+    }> = new Map();
+
+    const stepFailureCounts: Map<string, number> = new Map();
+
+    for (const failure of failures) {
+      for (const job of failure.failedJobs) {
+        // Count failing step names
+        for (const step of job.steps) {
+          const key = step.name.toLowerCase();
+          stepFailureCounts.set(key, (stepFailureCounts.get(key) || 0) + 1);
+        }
+
+        // Analyze error annotations for patterns
+        for (const annotation of job.errorAnnotations) {
+          const lower = annotation.toLowerCase();
+
+          // Detect common error patterns - ORDER MATTERS (most specific first)
+          
+          // GitHub Actions specific permission errors
+          if (lower.includes('resource not accessible by integration') || lower.includes('resource not accessible')) {
+            this.addPattern(patterns, 'github-permissions', 'GitHub token permissions insufficient', annotation, 
+              'Add permissions block to workflow. Common fix:\n```yaml\npermissions:\n  contents: read\n  issues: write\n  pull-requests: write\n  security-events: write  # for SARIF uploads\n```');
+          } else if (lower.includes('could not create check run') || lower.includes('could not create status')) {
+            this.addPattern(patterns, 'github-permissions', 'Missing checks/statuses permission', annotation,
+              'Add `checks: write` or `statuses: write` to workflow permissions block.');
+          } else if (lower.includes('sarif') || (lower.includes('upload') && lower.includes('fail'))) {
+            this.addPattern(patterns, 'sarif-upload', 'SARIF upload failed (code scanning)', annotation,
+              'Add `security-events: write` permission and ensure GitHub Advanced Security is enabled:\n```yaml\npermissions:\n  security-events: write\n```');
+          } else if (lower.includes('permission denied') || lower.includes('eacces')) {
+            this.addPattern(patterns, 'permissions', 'File permission denied', annotation, 
+              'Check file permissions or use chmod. For GitHub Actions, ensure proper permissions block.');
+          } else if (lower.includes('not found') || lower.includes('enoent') || lower.includes('no such file')) {
+            this.addPattern(patterns, 'missing-file', 'Missing file or directory', annotation,
+              'Verify file paths and ensure files are created before use. Check checkout step runs first.');
+          } else if (lower.includes('timeout') || lower.includes('timed out')) {
+            this.addPattern(patterns, 'timeout', 'Operation timed out', annotation,
+              'Increase timeout-minutes for the job or optimize the slow operation.');
+          } else if (lower.includes('secret') || lower.includes('token') || lower.includes('unauthorized') || lower.includes('401') || lower.includes('403')) {
+            this.addPattern(patterns, 'auth', 'Authentication/secret issue', annotation,
+              'Verify secrets are configured in repo settings and using correct syntax: ${{ secrets.NAME }}');
+          } else if (lower.includes('npm err') || lower.includes('yarn error') || lower.includes('pnpm')) {
+            this.addPattern(patterns, 'npm', 'Node.js package manager error', annotation,
+              'Clear npm cache, check package.json for issues, verify node version compatibility.');
+          } else if (lower.includes('maven') || lower.includes('gradle') || lower.includes('build failure')) {
+            this.addPattern(patterns, 'build', 'Build tool failure', annotation,
+              'Check build configuration and dependencies. Run build locally to reproduce.');
+          } else if (lower.includes('test failed') || lower.includes('assertion') || lower.includes('expect')) {
+            this.addPattern(patterns, 'test', 'Test failures', annotation,
+              'Review failing tests. Consider using retry for flaky tests: nick-fields/retry@v3');
+          } else if (lower.includes('docker') || lower.includes('container')) {
+            this.addPattern(patterns, 'docker', 'Docker/container issue', annotation,
+              'Check Dockerfile, verify base images exist, and ensure Docker daemon is running.');
+          } else if (lower.includes('rate limit') || lower.includes('api limit')) {
+            this.addPattern(patterns, 'rate-limit', 'API rate limit exceeded', annotation,
+              'Implement caching, reduce API calls, or use a different authentication method.');
+          } else if (lower.includes('syntax error') || lower.includes('parse error')) {
+            this.addPattern(patterns, 'syntax', 'Syntax/parse error', annotation,
+              'Check code syntax. For YAML, validate with yamllint. For code, run linter locally.');
+          } else if (annotation.length > 10) {
+            this.addPattern(patterns, 'other', 'Other errors', annotation,
+              'Review the full error message in the workflow run logs for more context.');
+          }
+        }
+
+        // Also analyze step names for common failure patterns
+        for (const step of job.steps) {
+          const stepLower = step.name.toLowerCase();
+          
+          // Debug logging for pattern matching
+          if (stepLower.includes('publish') || stepLower.includes('test')) {
+          }
+          
+          if (stepLower.includes('checkout')) {
+            this.addPattern(patterns, 'checkout', 'Checkout step failures', step.name,
+              'Check repository permissions, branch existence, and submodule settings.');
+          } else if (stepLower.includes('setup') && (stepLower.includes('node') || stepLower.includes('python') || stepLower.includes('java'))) {
+            this.addPattern(patterns, 'setup', 'Environment setup failures', step.name,
+              'Verify the language version is valid. Check if runner has required dependencies.');
+          } else if (stepLower.includes('install') || stepLower.includes('dependencies')) {
+            this.addPattern(patterns, 'dependencies', 'Dependency installation failures', step.name,
+              'Clear package cache, check for lockfile issues, verify registry access.');
+          } else if (stepLower.includes('sarif') || stepLower.includes('upload') && (stepLower.includes('result') || stepLower.includes('report') || stepLower.includes('scan'))) {
+            this.addPattern(patterns, 'sarif-upload', 'SARIF/scan upload failed', step.name,
+              'Add `security-events: write` permission to your workflow:\n```yaml\npermissions:\n  security-events: write\n  contents: read\n```\nAlso ensure GitHub Advanced Security is enabled for the repository.');
+          } else if (stepLower.includes('codeql') || stepLower.includes('code scanning')) {
+            this.addPattern(patterns, 'code-scanning', 'CodeQL/code scanning failure', step.name,
+              'Check CodeQL configuration, ensure language is correct, and add `security-events: write` permission.');
+          } else if (stepLower.includes('publish') && (stepLower.includes('test') || stepLower.includes('result'))) {
+            this.addPattern(patterns, 'test-publish', 'Test results publish failed', step.name,
+              'Add `checks: write` permission to publish test results:\n```yaml\npermissions:\n  checks: write\n  contents: read\n```');
+          } else if (stepLower.includes('build')) {
+            this.addPattern(patterns, 'build', 'Build step failures', step.name,
+              'Check build scripts, verify environment variables, and test build locally.');
+          } else if (stepLower.includes('test') || stepLower.includes('lint')) {
+            this.addPattern(patterns, 'test', 'Test/lint failures', step.name,
+              'Run tests locally to reproduce. Consider marking flaky tests or adding retry.');
+          } else if (stepLower.includes('deploy')) {
+            this.addPattern(patterns, 'deploy', 'Deployment failures', step.name,
+              'Verify deployment credentials, target environment health, and permissions.');
+          }
+        }
+      }
+    }
+
+    // Convert maps to arrays
+    let patternsList = Array.from(patterns.values());
+
+    // Consolidate permission-related patterns into a single unified suggestion
+    const permissionCategories = ['github-permissions', 'test-publish', 'sarif-upload', 'code-scanning'];
+    const permissionPatterns = patternsList.filter(p => permissionCategories.includes(p.category));
+    
+    if (permissionPatterns.length > 1) {
+      // Merge all permission-related patterns into one
+      const totalCount = permissionPatterns.reduce((sum, p) => sum + p.count, 0);
+      const allExamples = permissionPatterns.flatMap(p => p.examples).slice(0, 3);
+      
+      // Build comprehensive permissions block based on what's needed
+      const needsChecks = permissionPatterns.some(p => p.category === 'test-publish');
+      const needsSecurityEvents = permissionPatterns.some(p => 
+        p.category === 'sarif-upload' || p.category === 'code-scanning' ||
+        p.suggestedFix.includes('security-events'));
+      const needsPRWrite = permissionPatterns.some(p => 
+        p.suggestedFix.includes('pull-requests: write'));
+      const needsIssuesWrite = permissionPatterns.some(p => 
+        p.suggestedFix.includes('issues: write'));
+      
+      let permissionsBlock = 'permissions:\n  contents: read';
+      if (needsChecks) permissionsBlock += '\n  checks: write         # for test results publishing';
+      if (needsSecurityEvents) permissionsBlock += '\n  security-events: write # for SARIF/code scanning uploads';
+      if (needsPRWrite) permissionsBlock += '\n  pull-requests: write';
+      if (needsIssuesWrite) permissionsBlock += '\n  issues: write';
+      
+      const consolidatedPattern = {
+        category: 'permissions',
+        count: totalCount,
+        description: 'Workflow permissions insufficient',
+        examples: allExamples,
+        suggestedFix: `Add the following permissions block to your workflow:\n\`\`\`yaml\n${permissionsBlock}\n\`\`\``,
+      };
+      
+      // Remove individual permission patterns and add consolidated one
+      patternsList = patternsList.filter(p => !permissionCategories.includes(p.category));
+      patternsList.unshift(consolidatedPattern);
+    }
+
+    // Sort by count
+    patternsList.sort((a, b) => b.count - a.count);
+
+    const commonFailingSteps = Array.from(stepFailureCounts.entries())
+      .map(([step, count]) => ({ step, count }))
+      .sort((a, b) => b.count - a.count)
+      .slice(0, 5);
+
+    // Generate summary
+    const totalFailures = failures.length;
+    const topPattern = patternsList[0];
+    const summary = totalFailures === 0
+      ? 'No recent failures found.'
+      : `Analyzed ${totalFailures} failed runs. Most common issue: ${topPattern?.category || 'unknown'} (${topPattern?.count || 0} occurrences).`;
+
+    return {
+      patterns: patternsList,
+      commonFailingSteps,
+      summary,
+    };
+  }
+
+  private addPattern(
+    patterns: Map<string, { category: string; count: number; description: string; examples: string[]; suggestedFix: string }>,
+    category: string,
+    description: string,
+    example: string,
+    suggestedFix: string
+  ): void {
+    const existing = patterns.get(category);
+    if (existing) {
+      existing.count++;
+      if (existing.examples.length < 3 && !existing.examples.includes(example)) {
+        existing.examples.push(example);
+      }
+    } else {
+      patterns.set(category, {
+        category,
+        count: 1,
+        description,
+        examples: [example],
+        suggestedFix,
+      });
+    }
+  }
 }
 

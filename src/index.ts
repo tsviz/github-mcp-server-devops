@@ -13,10 +13,12 @@ import { ConfigLoader } from './config/config-loader.js';
 import { 
   generateCostInsights, 
   generateDORAInsights, 
+  generateWorkflowSourceInsights,
   isAIAdvisorEnabled, 
   getAIProviderInfo,
   type CostInsightContext,
-  type DORAInsightContext 
+  type DORAInsightContext,
+  type WorkflowSourceContext,
 } from './ai/advisor.js';
 import {
   detectRunnerFromLabels,
@@ -295,6 +297,19 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
           analyze_dependencies: { type: 'boolean', description: 'Analyze job dependencies' },
         },
         required: defaultOrg ? ['repo_name', 'workflow_name'] : ['org_name', 'repo_name', 'workflow_name'],
+      },
+    },
+    {
+      name: 'analyze_workflow_source',
+      description: `Analyze actual workflow YAML source code and provide specific optimization suggestions based on the code. This reads the workflow file content and provides targeted improvements.${defaultOrg ? ` (default org: ${defaultOrg})` : ''}`,
+      inputSchema: {
+        type: 'object' as const,
+        properties: {
+          org_name: { type: 'string', description: `Organization name${defaultOrg ? ` (default: ${defaultOrg})` : ''}` },
+          repo_name: { type: 'string', description: 'Repository name (required)' },
+          workflow_path: { type: 'string', description: 'Path to workflow file (e.g., .github/workflows/ci.yml). If not provided, analyzes all workflows.' },
+        },
+        required: defaultOrg ? ['repo_name'] : ['org_name', 'repo_name'],
       },
     },
     {
@@ -777,6 +792,76 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           content: [{
             type: 'text',
             text: `## 🔍 Workflow Insights\n\n${insights.summary}\n\n\`\`\`mermaid\n${visualization}\n\`\`\`\n\n### Bottlenecks Detected:\n${insights.bottlenecks}\n\n### Optimization Suggestions:\n${insights.suggestions}`,
+          }],
+        };
+      }
+
+      case 'analyze_workflow_source': {
+        const orgName = getOrgName(args);
+        const repoName = (args as any).repo_name;
+        const workflowPath = (args as any).workflow_path;
+
+        // Fetch workflow file(s) from the repository
+        const workflowFiles = await githubClient.getWorkflowFileContent(
+          orgName,
+          repoName,
+          workflowPath
+        );
+
+        if (workflowFiles.error) {
+          return {
+            content: [{
+              type: 'text',
+              text: `## ❌ Error Fetching Workflow\n\n${workflowFiles.error}\n\n💡 Make sure the repository and workflow path are correct.`,
+            }],
+          };
+        }
+
+        if (workflowFiles.workflows.length === 0) {
+          return {
+            content: [{
+              type: 'text',
+              text: `## 📋 No Workflows Found\n\nNo workflow files found in \`${orgName}/${repoName}\`.\n\n💡 Workflows should be in \`.github/workflows/\` directory.`,
+            }],
+          };
+        }
+
+        // Analyze each workflow
+        const results: string[] = [];
+        
+        for (const workflow of workflowFiles.workflows) {
+          // Static analysis first
+          const staticAnalysis = githubClient.analyzeWorkflowContent(workflow.content, workflow.name);
+          
+          // Prepare context for AI analysis
+          const context: WorkflowSourceContext = {
+            organization: orgName,
+            repo: repoName,
+            workflowName: staticAnalysis.name,
+            workflowPath: workflow.path,
+            content: workflow.content,
+            staticAnalysis: {
+              triggers: staticAnalysis.triggers,
+              jobs: staticAnalysis.jobs,
+              issues: staticAnalysis.issues,
+              optimizations: staticAnalysis.optimizations,
+            },
+          };
+          
+          // Generate AI-powered insights
+          const aiResult = await generateWorkflowSourceInsights(context);
+          
+          results.push(`# 📄 ${workflow.path}\n\n${aiResult.insights}`);
+          
+          if (aiResult.error) {
+            results.push(`\n> ⚠️ AI analysis fallback: ${aiResult.error}`);
+          }
+        }
+
+        return {
+          content: [{
+            type: 'text',
+            text: results.join('\n\n---\n\n'),
           }],
         };
       }
@@ -1366,6 +1451,105 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         } catch (err: any) {
           console.error('Error fetching report data:', err.message);
         }
+
+        // ============================================
+        // Workflow Source Analysis for Real Suggestions
+        // ============================================
+        // Fetch and analyze actual workflow YAML files for source-aware suggestions
+        interface WorkflowSourceAnalysis {
+          workflow: string;
+          repo: string;
+          path: string;
+          issues: Array<{ severity: string; category: string; message: string; suggestion?: string }>;
+          optimizations: Array<{ type: string; description: string; impact: string; codeExample?: string }>;
+          content?: string;
+          // NEW: Failure analysis data
+          failurePatterns?: {
+            patterns: Array<{
+              category: string;
+              count: number;
+              description: string;
+              examples: string[];
+              suggestedFix: string;
+            }>;
+            commonFailingSteps: Array<{ step: string; count: number }>;
+            summary: string;
+          };
+          recentErrors?: string[];
+        }
+        
+        const workflowSourceAnalyses: Map<string, WorkflowSourceAnalysis> = new Map();
+        
+        // Get unique repos from failing/slow workflows to analyze
+        const workflowsToAnalyze = perfData?.byWorkflow?.filter((w: any) => 
+          w.failureRate > 15 || w.avgDurationSeconds > 600
+        ) || [];
+        
+        // Extract unique repos and their workflows
+        const reposToAnalyze = new Map<string, string[]>();
+        for (const wf of workflowsToAnalyze.slice(0, 10)) { // Limit to 10 workflows
+          const repo = wf.firstRepo || wf.repo;
+          if (repo) {
+            if (!reposToAnalyze.has(repo)) {
+              reposToAnalyze.set(repo, []);
+            }
+            if (wf.path) {
+              reposToAnalyze.get(repo)?.push(wf.path);
+            }
+          }
+        }
+        
+        // Fetch and analyze workflow files + failure patterns
+        console.error(`📄 Analyzing workflow source files and failures from ${reposToAnalyze.size} repositories...`);
+        for (const [repo, paths] of reposToAnalyze) {
+          try {
+            // Fetch workflow YAML files
+            const workflowFiles = await githubClient.getWorkflowFileContent(orgName, repo);
+            
+            // Fetch recent failures for this repo
+            const failureData = await githubClient.getWorkflowFailures(orgName, repo, undefined, 5);
+            const failurePatterns = githubClient.analyzeFailurePatterns(failureData.failures);
+            
+            if (!workflowFiles.error && workflowFiles.workflows.length > 0) {
+              for (const wfFile of workflowFiles.workflows) {
+                // Run static analysis on the workflow content
+                const analysis = githubClient.analyzeWorkflowContent(wfFile.content, wfFile.name);
+                
+                // Find failures specific to this workflow
+                const wfFailures = failureData.failures.filter(f => 
+                  f.workflow.toLowerCase().includes(analysis.name.toLowerCase()) ||
+                  analysis.name.toLowerCase().includes(f.workflow.toLowerCase())
+                );
+                
+                // Extract recent error messages for this workflow
+                const recentErrors: string[] = [];
+                for (const failure of wfFailures.slice(0, 3)) {
+                  for (const job of failure.failedJobs) {
+                    recentErrors.push(...job.errorAnnotations.slice(0, 2));
+                    for (const step of job.steps.slice(0, 2)) {
+                      recentErrors.push(`Step "${step.name}" failed`);
+                    }
+                  }
+                }
+                
+                const key = `${repo}/${wfFile.path}`;
+                workflowSourceAnalyses.set(key, {
+                  workflow: analysis.name,
+                  repo,
+                  path: wfFile.path,
+                  issues: analysis.issues,
+                  optimizations: analysis.optimizations,
+                  content: wfFile.content,
+                  failurePatterns: wfFailures.length > 0 ? githubClient.analyzeFailurePatterns(wfFailures) : undefined,
+                  recentErrors: recentErrors.slice(0, 5),
+                });
+              }
+            }
+          } catch (err) {
+            console.error(`  ⚠️ Could not analyze workflows in ${repo}`);
+          }
+        }
+        console.error(`  ✅ Analyzed ${workflowSourceAnalyses.size} workflow files with failure patterns`);
 
         // Helper to generate workflow link
         const getWorkflowLink = (wf: any, org: string): string => {
@@ -3564,110 +3748,164 @@ ${htmlFoot}`;
             </table>
         </div>
         
-        <!-- AI Code Suggestions for Failing Workflows -->
+        <!-- Source-Aware Code Suggestions for Failing Workflows -->
         <div class="card wide" style="margin-top: 20px;">
-            <h3>🤖 GitHub Copilot Suggestions</h3>
-            <p style="color: #888; margin-bottom: 20px;">AI-powered code fixes for your failing workflows. Copy these snippets to improve reliability.</p>
-            ${failingWfs.slice(0, 3).map((wf: any) => {
+            <h3>🤖 Intelligent Failure Analysis</h3>
+            <p style="color: #888; margin-bottom: 20px;">Analyzed <strong>workflow source code</strong> and <strong>recent failure logs</strong> for root cause insights. ${workflowSourceAnalyses.size > 0 ? `✅ Analyzed ${workflowSourceAnalyses.size} workflow files.` : '⚠️ Could not fetch workflow files for analysis.'}</p>
+            ${failingWfs.slice(0, 5).map((wf: any) => {
               const wfLink = getWorkflowLink(wf, orgName);
               const wfName = wf.name.slice(0, 50);
-              const isTest = wf.name.toLowerCase().includes('test') || wf.name.toLowerCase().includes('lint') || wf.name.toLowerCase().includes('ci');
-              const isSecurity = wf.name.toLowerCase().includes('codeql') || wf.name.toLowerCase().includes('semgrep') || wf.name.toLowerCase().includes('security');
-              const isDeploy = wf.name.toLowerCase().includes('deploy') || wf.name.toLowerCase().includes('release');
+              const repo = wf.firstRepo || wf.repo || '';
+              const wfPath = wf.path || '.github/workflows/' + wf.name.replace(/[^a-z0-9]/gi, '-').toLowerCase() + '.yml';
               
-              let suggestion = '';
-              if (wf.failureRate === 100) {
-                suggestion = `<div style="color: #f87171; margin-bottom: 10px;"><strong>⚠️ 100% failure rate</strong> - likely a configuration issue or missing secret</div>
-                <pre style="background: #1e1e2e; padding: 15px; border-radius: 8px; overflow-x: auto; font-size: 0.85em;"><code># Check for missing secrets in your workflow
-env:
-  # Ensure these secrets exist in repo settings
-  MY_TOKEN: \${{ secrets.MY_TOKEN }}
-  
-# Add debug step to troubleshoot
-- name: Debug Environment
-  run: |
-    echo "Runner: \${{ runner.os }}"
-    echo "Event: \${{ github.event_name }}"
-    env | grep -v TOKEN | sort</code></pre>`;
-              } else if (isTest) {
-                suggestion = `<pre style="background: #1e1e2e; padding: 15px; border-radius: 8px; overflow-x: auto; font-size: 0.85em;"><code># Add retry logic for flaky tests
-- name: Run tests with retry
-  uses: nick-fields/retry@v3
-  with:
-    timeout_minutes: 10
-    max_attempts: 3
-    command: npm test
-    
-# Or use continue-on-error with follow-up
-- name: Run lint
-  id: lint
-  continue-on-error: true
-  run: npm run lint
-  
-- name: Lint failed - show warnings
-  if: steps.lint.outcome == 'failure'
-  run: echo "::warning::Lint issues found"</code></pre>`;
-              } else if (isSecurity) {
-                suggestion = `<pre style="background: #1e1e2e; padding: 15px; border-radius: 8px; overflow-x: auto; font-size: 0.85em;"><code># Fix common security scan issues
-- name: Initialize CodeQL
-  uses: github/codeql-action/init@v3
-  with:
-    languages: javascript  # Specify language explicitly
-    config-file: ./.github/codeql/codeql-config.yml
-    
-# For Semgrep - use continue-on-error for non-blocking
-- name: Semgrep scan
-  uses: semgrep/semgrep-action@v1
-  continue-on-error: true  # Don't block on findings
-  with:
-    config: p/default</code></pre>`;
-              } else if (isDeploy) {
-                suggestion = `<pre style="background: #1e1e2e; padding: 15px; border-radius: 8px; overflow-x: auto; font-size: 0.85em;"><code># Add deployment safeguards
-jobs:
-  deploy:
-    environment: production  # Requires approval
-    concurrency:
-      group: production
-      cancel-in-progress: false  # Don't cancel running deploys
-    steps:
-      - name: Deploy with rollback
-        id: deploy
-        run: ./deploy.sh
-        
-      - name: Rollback on failure
-        if: failure()
-        run: ./rollback.sh</code></pre>`;
-              } else {
-                suggestion = `<pre style="background: #1e1e2e; padding: 15px; border-radius: 8px; overflow-x: auto; font-size: 0.85em;"><code># General reliability improvements
-- name: Checkout with retry
-  uses: actions/checkout@v4
-  with:
-    fetch-depth: 0
-    
-- name: Setup with caching
-  uses: actions/setup-node@v4
-  with:
-    node-version: '20'
-    cache: 'npm'
-    
-- name: Install with retry
-  uses: nick-fields/retry@v3
-  with:
-    max_attempts: 3
-    command: npm ci</code></pre>`;
+              // Look up source analysis for this workflow
+              const analysisKey = `${repo}/${wfPath}`;
+              const sourceAnalysis = workflowSourceAnalyses.get(analysisKey);
+              
+              // Also try to find by workflow name if path doesn't match
+              let matchedAnalysis = sourceAnalysis;
+              if (!matchedAnalysis) {
+                for (const [key, analysis] of workflowSourceAnalyses.entries()) {
+                  if (key.includes(repo) && (analysis.workflow === wf.name || key.includes(wf.name))) {
+                    matchedAnalysis = analysis;
+                    break;
+                  }
+                }
               }
               
-              return `
-            <div style="margin-bottom: 25px; padding: 20px; background: rgba(255,255,255,0.03); border-radius: 12px; border-left: 4px solid #f87171;">
-                <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px;">
-                    <div>
-                        <strong style="font-size: 1.1em;">${wfName}</strong>
-                        <span style="color: #f87171; margin-left: 10px;">${wf.failureRate}% failure rate</span>
-                    </div>
-                    ${wfLink ? `<a href="${wfLink}" target="_blank" style="color: #00d4ff; text-decoration: none; padding: 8px 16px; background: rgba(0,212,255,0.1); border-radius: 8px;">View Workflow →</a>` : ''}
-                </div>
-                ${suggestion}
-            </div>`;
+              let suggestionHtml = '';
+              
+              if (matchedAnalysis) {
+                const issues = matchedAnalysis.issues || [];
+                const optimizations = matchedAnalysis.optimizations || [];
+                const failurePatterns = matchedAnalysis.failurePatterns;
+                const recentErrors = matchedAnalysis.recentErrors || [];
+                
+                suggestionHtml = '<div style="margin-bottom: 10px;">';
+                
+                // PRIORITY 1: Show actual failure patterns from logs
+                if (failurePatterns && failurePatterns.patterns.length > 0) {
+                  suggestionHtml += '<div style="background: rgba(239,68,68,0.1); padding: 15px; border-radius: 8px; margin-bottom: 15px; border: 1px solid rgba(239,68,68,0.3);">';
+                  suggestionHtml += '<div style="color: #f87171; margin-bottom: 10px;"><strong>🔍 Root Cause Analysis (from recent failures):</strong></div>';
+                  
+                  for (const pattern of failurePatterns.patterns.slice(0, 3)) {
+                    suggestionHtml += '<div style="margin-bottom: 12px;">';
+                    suggestionHtml += '<div style="color: #fca5a5;"><strong>• ' + pattern.description + '</strong> <span style="color: #888;">(' + pattern.count + ' occurrence' + (pattern.count > 1 ? 's' : '') + ')</span></div>';
+                    if (pattern.examples.length > 0) {
+                      suggestionHtml += '<div style="color: #888; font-size: 0.85em; margin: 5px 0 5px 15px; font-family: monospace; background: rgba(0,0,0,0.3); padding: 5px 10px; border-radius: 4px;">' + pattern.examples[0].slice(0, 120) + (pattern.examples[0].length > 120 ? '...' : '') + '</div>';
+                    }
+                    // Convert markdown code blocks to HTML
+                    let fixHtml = pattern.suggestedFix
+                      .replace(/```yaml\n?/g, '</span><pre style="background: #1e1e2e; padding: 10px; border-radius: 6px; margin: 8px 0 0 15px; font-size: 0.85em; overflow-x: auto;"><code>')
+                      .replace(/```\n?/g, '</code></pre><span>')
+                      .replace(/\n/g, '<br>');
+                    // Clean up empty spans
+                    fixHtml = fixHtml.replace(/<span><\/span>/g, '').replace(/^<\/span>/, '').replace(/<span>$/, '');
+                    suggestionHtml += '<div style="color: #4ade80; font-size: 0.9em; margin-left: 15px;">💡 Fix: <span>' + fixHtml + '</span></div>';
+                    suggestionHtml += '</div>';
+                  }
+                  
+                  if (failurePatterns.commonFailingSteps.length > 0) {
+                    suggestionHtml += '<div style="margin-top: 10px; color: #888;"><strong>Commonly failing steps:</strong> ' + failurePatterns.commonFailingSteps.map(s => '<code style="background: rgba(255,255,255,0.1); padding: 2px 6px; border-radius: 4px; margin: 0 3px;">' + s.step + '</code>').join(', ') + '</div>';
+                  }
+                  
+                  suggestionHtml += '</div>';
+                }
+                
+                // PRIORITY 2: Show recent error messages
+                if (recentErrors.length > 0 && !failurePatterns?.patterns.length) {
+                  suggestionHtml += '<div style="background: rgba(251,191,36,0.1); padding: 12px; border-radius: 8px; margin-bottom: 12px;">';
+                  suggestionHtml += '<div style="color: #fbbf24; margin-bottom: 8px;"><strong>📋 Recent Error Messages:</strong></div>';
+                  suggestionHtml += '<ul style="margin: 0 0 0 20px; color: #fcd34d; font-size: 0.9em;">';
+                  recentErrors.slice(0, 3).forEach(err => {
+                    suggestionHtml += '<li style="margin-bottom: 4px;">' + err.replace(/</g, '&lt;').replace(/>/g, '&gt;').slice(0, 100) + '</li>';
+                  });
+                  suggestionHtml += '</ul></div>';
+                }
+                
+                // PRIORITY 3: Show high-severity issues from static analysis
+                const highIssues = issues.filter(i => i.severity === 'high');
+                if (highIssues.length > 0) {
+                  suggestionHtml += '<div style="color: #f87171; margin-bottom: 10px;"><strong>🔴 Critical Issues in YAML:</strong></div><ul style="margin: 0 0 15px 20px; color: #fca5a5;">';
+                  highIssues.forEach(i => {
+                    suggestionHtml += '<li>' + i.message + (i.suggestion ? ' → ' + i.suggestion : '') + '</li>';
+                  });
+                  suggestionHtml += '</ul>';
+                }
+                
+                // PRIORITY 4: Show optimization suggestions ONLY when we don't have failure-based insights
+                // Generic suggestions like CONCURRENCY/PATH-FILTER are noise when we have real failure analysis
+                const hasFailureInsights = failurePatterns && failurePatterns.patterns.length > 0;
+                
+                if (!hasFailureInsights) {
+                  const highImpactOpts = optimizations.filter(o => o.impact === 'high');
+                  const mediumImpactOpts = optimizations.filter(o => o.impact === 'medium');
+                  const relevantOpts = [...highImpactOpts, ...mediumImpactOpts].slice(0, 2);
+                  
+                  if (relevantOpts.length > 0) {
+                    suggestionHtml += '<div style="color: #22c55e; margin-bottom: 10px;"><strong>⚡ Optimizations:</strong></div>';
+                    for (const opt of relevantOpts) {
+                      suggestionHtml += '<div style="margin-bottom: 10px; padding-left: 15px;">';
+                      suggestionHtml += '<div style="color: #86efac;"><strong>' + opt.type.toUpperCase() + ':</strong> ' + opt.description + '</div>';
+                      if (opt.codeExample) {
+                        suggestionHtml += '<pre style="background: #1e1e2e; padding: 12px; border-radius: 8px; overflow-x: auto; font-size: 0.85em; margin-top: 8px;"><code>' + opt.codeExample.replace(/</g, '&lt;').replace(/>/g, '&gt;') + '</code></pre>';
+                      }
+                      suggestionHtml += '</div>';
+                    }
+                  }
+                }
+                
+                // Show medium-severity issues briefly
+                const mediumIssues = issues.filter(i => i.severity === 'medium');
+                if (mediumIssues.length > 0 && !failurePatterns?.patterns.length) {
+                  suggestionHtml += '<div style="color: #fbbf24; margin-bottom: 10px;"><strong>🟡 Improvements:</strong></div><ul style="margin: 0 0 15px 20px; color: #fcd34d; font-size: 0.9em;">';
+                  mediumIssues.slice(0, 2).forEach(i => {
+                    suggestionHtml += '<li>' + i.message + '</li>';
+                  });
+                  suggestionHtml += '</ul>';
+                }
+                
+                suggestionHtml += '</div>';
+              } else {
+                // Fallback: Generic suggestions based on workflow name patterns
+                const isTest = wf.name.toLowerCase().includes('test') || wf.name.toLowerCase().includes('lint') || wf.name.toLowerCase().includes('ci');
+                const isSecurity = wf.name.toLowerCase().includes('codeql') || wf.name.toLowerCase().includes('semgrep') || wf.name.toLowerCase().includes('security');
+                const isDeploy = wf.name.toLowerCase().includes('deploy') || wf.name.toLowerCase().includes('release');
+                
+                if (wf.failureRate === 100) {
+                  suggestionHtml = '<div style="color: #f87171; margin-bottom: 10px;"><strong>⚠️ 100% failure rate</strong> - likely a configuration issue or missing secret</div><pre style="background: #1e1e2e; padding: 15px; border-radius: 8px; overflow-x: auto; font-size: 0.85em;"><code># Check for missing secrets\nenv:\n  MY_TOKEN: \\${{ secrets.MY_TOKEN }}\n\n# Add debug step\n- name: Debug\n  run: env | grep -v TOKEN | sort</code></pre>';
+                } else if (isSecurity) {
+                  suggestionHtml = '<div style="color: #f87171; margin-bottom: 10px;"><strong>🔒 Security scanner failures</strong> - check scanner configuration</div><pre style="background: #1e1e2e; padding: 15px; border-radius: 8px; overflow-x: auto; font-size: 0.85em;"><code># Common security scanner fixes:\n# 1. Check SEMGREP_APP_TOKEN secret is set\n# 2. Verify scanning rules are compatible\n# 3. Add continue-on-error for non-blocking scans\njobs:\n  scan:\n    continue-on-error: true</code></pre>';
+                } else if (isTest) {
+                  suggestionHtml = '<pre style="background: #1e1e2e; padding: 15px; border-radius: 8px; overflow-x: auto; font-size: 0.85em;"><code># Add retry for flaky tests\n- uses: nick-fields/retry@v3\n  with:\n    max_attempts: 3\n    command: npm test</code></pre>';
+                } else if (isDeploy) {
+                  suggestionHtml = '<pre style="background: #1e1e2e; padding: 15px; border-radius: 8px; overflow-x: auto; font-size: 0.85em;"><code># Add deployment safeguards\njobs:\n  deploy:\n    environment: production\n    concurrency:\n      group: production\n      cancel-in-progress: false</code></pre>';
+                } else {
+                  suggestionHtml = '<pre style="background: #1e1e2e; padding: 15px; border-radius: 8px; overflow-x: auto; font-size: 0.85em;"><code># General improvements\n- uses: actions/checkout@v4\n- uses: actions/setup-node@v4\n  with:\n    cache: npm</code></pre>';
+                }
+                suggestionHtml = '<div style="color: #888; font-style: italic; margin-bottom: 10px;">ℹ️ Could not fetch workflow source - showing general suggestions</div>' + suggestionHtml;
+              }
+              
+              const hasRealAnalysis = matchedAnalysis && (matchedAnalysis.failurePatterns?.patterns.length || matchedAnalysis.recentErrors?.length || matchedAnalysis.issues.length);
+              const borderColor = hasRealAnalysis ? '#22c55e' : matchedAnalysis ? '#fbbf24' : '#f87171';
+              const sourceTag = matchedAnalysis 
+                ? (matchedAnalysis.failurePatterns?.patterns.length 
+                    ? '<span style="color: #22c55e; margin-left: 10px; font-size: 0.85em;">📊 Failure Logs Analyzed</span>'
+                    : '<span style="color: #fbbf24; margin-left: 10px; font-size: 0.85em;">📄 Source Only</span>')
+                : '';
+              const viewLink = wfLink ? '<a href="' + wfLink + '" target="_blank" style="color: #00d4ff; text-decoration: none; padding: 8px 16px; background: rgba(0,212,255,0.1); border-radius: 8px;">View Workflow →</a>' : '';
+              
+              return '<div style="margin-bottom: 25px; padding: 20px; background: rgba(255,255,255,0.03); border-radius: 12px; border-left: 4px solid ' + borderColor + ';">' +
+                '<div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px;">' +
+                  '<div>' +
+                    '<strong style="font-size: 1.1em;">' + wfName + '</strong>' +
+                    '<span style="color: #f87171; margin-left: 10px;">' + wf.failureRate + '% failure rate</span>' +
+                    sourceTag +
+                  '</div>' +
+                  viewLink +
+                '</div>' +
+                suggestionHtml +
+              '</div>';
             }).join('')}
         </div>`;
         })()}
@@ -4107,74 +4345,85 @@ jobs:
         }).join('')}</tbody></table>
         
         <div style="margin-top: 20px; padding: 15px; background: rgba(239,68,68,0.1); border-radius: 12px;">
-            <h4 style="color: #f87171; margin-bottom: 15px;">🤖 GitHub Copilot Reliability Fixes</h4>
+            <h4 style="color: #f87171; margin-bottom: 15px;">🤖 Intelligent Failure Analysis</h4>
             ${failingWf.slice(0, 3).map((w: any) => {
               const wfLink = getWorkflowLink(w, orgName);
               const wastedMins = Math.round(w.avgDurationSeconds / 60 * w.runs * w.failureRate / 100);
-              const isTest = w.name.toLowerCase().includes('test') || w.name.toLowerCase().includes('lint');
-              const isSecurity = w.name.toLowerCase().includes('codeql') || w.name.toLowerCase().includes('security');
+              
+              // Try to get actual failure patterns from analysis (same lookup as cicd-details)
+              const repo = w.firstRepo || w.repo || '';
+              const wfPath = w.path || '.github/workflows/' + w.name.replace(/[^a-z0-9]/gi, '-').toLowerCase() + '.yml';
+              const analysisKey = `${repo}/${wfPath}`;
+              let matchedAnalysis = workflowSourceAnalyses.get(analysisKey);
+              
+              // Fuzzy match if exact match fails - try multiple strategies
+              if (!matchedAnalysis && repo) {
+                for (const [key, analysis] of workflowSourceAnalyses.entries()) {
+                  // Match by repo + workflow name
+                  if (key.includes(repo) && (analysis.workflow === w.name || key.toLowerCase().includes(w.name.toLowerCase()))) {
+                    matchedAnalysis = analysis;
+                    break;
+                  }
+                }
+              }
+              
+              // Last resort: match by workflow name alone (case-insensitive)
+              if (!matchedAnalysis) {
+                const wfNameLower = w.name.toLowerCase();
+                for (const [key, analysis] of workflowSourceAnalyses.entries()) {
+                  if (analysis.workflow?.toLowerCase() === wfNameLower) {
+                    matchedAnalysis = analysis;
+                    break;
+                  }
+                }
+              }
               
               let suggestion = '';
-              if (w.failureRate === 100) {
-                suggestion = `<pre style="background: #1e1e2e; padding: 15px; border-radius: 8px; overflow-x: auto; font-size: 0.85em;"><code># 100% failure - check configuration
-# Common fixes:
-# 1. Missing secrets
-env:
-  API_KEY: \${{ secrets.API_KEY }}  # Verify in repo settings
+              
+              // If we have actual failure patterns, use them
+              if (matchedAnalysis?.failurePatterns?.patterns?.length) {
+                const patterns = matchedAnalysis.failurePatterns.patterns.slice(0, 2);
+                suggestion = patterns.map((pattern: any) => {
+                  // Convert markdown code blocks to HTML
+                  let fixHtml = pattern.suggestedFix
+                    .replace(/```yaml\n?/g, '<pre style="background: #1e1e2e; padding: 10px; border-radius: 6px; margin: 8px 0; font-size: 0.85em; overflow-x: auto;"><code>')
+                    .replace(/```\n?/g, '</code></pre>')
+                    .replace(/\n/g, '<br>');
+                  
+                  return `<div style="margin-bottom: 10px;">
+                    <strong style="color: #fca5a5;">• ${pattern.description}</strong> <span style="color: #888;">(${pattern.count}x)</span><br>
+                    <span style="color: #4ade80; font-size: 0.9em;">💡 Fix: </span><span style="color: #888;">${fixHtml}</span>
+                  </div>`;
+                }).join('');
+              } else {
+                // Fallback to generic suggestions
+                const isTest = w.name.toLowerCase().includes('test') || w.name.toLowerCase().includes('lint');
+                const isSecurity = w.name.toLowerCase().includes('codeql') || w.name.toLowerCase().includes('security') || w.name.toLowerCase().includes('semgrep') || w.name.toLowerCase().includes('sarif');
+                
+                if (isSecurity) {
+                  suggestion = `<pre style="background: #1e1e2e; padding: 15px; border-radius: 8px; overflow-x: auto; font-size: 0.85em;"><code># Security scan permissions
+permissions:
+  security-events: write
+  contents: read
 
-# 2. Wrong trigger conditions
-on:
-  push:
-    branches: [main, develop]  # Check branch names
-    
-# 3. Add debugging
-- name: Debug info
-  run: |
-    echo "Event: \${{ github.event_name }}"
-    echo "Ref: \${{ github.ref }}"</code></pre>`;
-              } else if (isTest) {
-                suggestion = `<pre style="background: #1e1e2e; padding: 15px; border-radius: 8px; overflow-x: auto; font-size: 0.85em;"><code># Flaky test handling
+# Increase timeout for scans
+- uses: github/codeql-action/analyze@v3
+  timeout-minutes: 30</code></pre>`;
+                } else if (isTest) {
+                  suggestion = `<pre style="background: #1e1e2e; padding: 15px; border-radius: 8px; overflow-x: auto; font-size: 0.85em;"><code># Add retry for flaky tests
 - name: Run tests with retry
   uses: nick-fields/retry@v3
   with:
-    timeout_minutes: 15
     max_attempts: 3
-    retry_on: error
-    command: npm test
-
-# Quarantine flaky tests
-- name: Run stable tests
-  run: npm test -- --testPathIgnorePatterns=flaky</code></pre>`;
-              } else if (isSecurity) {
-                suggestion = `<pre style="background: #1e1e2e; padding: 15px; border-radius: 8px; overflow-x: auto; font-size: 0.85em;"><code># Security scan stability
-- uses: github/codeql-action/init@v3
-  with:
-    languages: javascript
-    queries: security-and-quality
-  timeout-minutes: 30  # Increase timeout
-  
-# Make non-blocking for findings
-- uses: github/codeql-action/analyze@v3
-  continue-on-error: true</code></pre>`;
-              } else {
-                suggestion = `<pre style="background: #1e1e2e; padding: 15px; border-radius: 8px; overflow-x: auto; font-size: 0.85em;"><code># General reliability improvements
-- name: Checkout
-  uses: actions/checkout@v4
-  with:
-    fetch-depth: 0
-
-# Add retry for network operations
+    command: npm test</code></pre>`;
+                } else {
+                  suggestion = `<pre style="background: #1e1e2e; padding: 15px; border-radius: 8px; overflow-x: auto; font-size: 0.85em;"><code># General reliability improvements
 - name: Install with retry
   uses: nick-fields/retry@v3
   with:
     max_attempts: 3
-    command: npm ci
-
-# Fail fast in matrix
-jobs:
-  build:
-    strategy:
-      fail-fast: true</code></pre>`;
+    command: npm ci</code></pre>`;
+                }
               }
               
               return `

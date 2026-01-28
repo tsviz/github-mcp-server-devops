@@ -1161,3 +1161,240 @@ export async function generateSecurityInsights(context: SecurityInsightContext):
     };
   }
 }
+
+// ============================================
+// Workflow Source Analysis (reads actual YAML)
+// ============================================
+
+export interface WorkflowSourceContext {
+  organization: string;
+  repo: string;
+  workflowName: string;
+  workflowPath: string;
+  content: string;
+  staticAnalysis: {
+    triggers: string[];
+    jobs: Array<{
+      name: string;
+      runsOn: string;
+      steps: number;
+      hasCache: boolean;
+      hasConcurrency: boolean;
+      hasTimeout: boolean;
+      hasMatrix: boolean;
+      uses: string[];
+    }>;
+    issues: Array<{
+      severity: 'high' | 'medium' | 'low';
+      category: string;
+      message: string;
+      suggestion?: string;
+    }>;
+    optimizations: Array<{
+      type: string;
+      description: string;
+      impact: 'high' | 'medium' | 'low';
+      codeExample?: string;
+    }>;
+  };
+}
+
+const WORKFLOW_SOURCE_PROMPT = `You are analyzing a GitHub Actions workflow file. Provide specific, actionable improvements based on the actual YAML source code.
+
+## Repository: {{organization}}/{{repo}}
+## Workflow: {{workflowName}}
+## Path: {{workflowPath}}
+
+## Workflow Source Code
+\`\`\`yaml
+{{content}}
+\`\`\`
+
+## Static Analysis Results
+### Triggers: {{triggersFormatted}}
+### Jobs Found: {{jobsCount}}
+{{jobsSummary}}
+
+### Pre-Identified Issues
+{{issuesSummary}}
+
+### Suggested Optimizations
+{{optimizationsSummary}}
+
+---
+
+Based on the ACTUAL WORKFLOW SOURCE CODE above, provide:
+
+### 🔍 Source Code Review
+Analyze the workflow YAML and identify:
+1. Specific inefficiencies in the current implementation
+2. Missing best practices that should be added
+3. Potential security concerns in the configuration
+
+### ✨ Recommended Changes
+For each improvement, provide:
+- **What to change** (reference specific lines/sections)
+- **Why it matters** (impact on speed/cost/reliability)
+- **Exact code** (show the improved YAML)
+
+Example format:
+\`\`\`yaml
+# BEFORE (line X)
+- uses: actions/checkout@v3
+
+# AFTER
+- uses: actions/checkout@v4
+  with:
+    fetch-depth: 0  # Needed for git history
+\`\`\`
+
+### ⚡ Quick Wins (< 5 min to implement)
+List 2-3 changes that can be made immediately with minimal risk.
+
+### 🎯 High-Impact Changes (requires testing)
+List 1-2 larger changes that would significantly improve the workflow.
+
+### 📊 Expected Impact
+| Change | Time Savings | Cost Impact | Effort |
+|--------|--------------|-------------|--------|
+| [Change 1] | X min | -$Y/month | Low |
+| [Change 2] | X min | -$Y/month | Medium |
+
+Focus on SPECIFIC improvements based on what you see in the source code. Reference actual job names, step names, and configurations from the YAML.
+
+Keep response under 800 words but include all code examples.`;
+
+function generateStaticWorkflowInsights(context: WorkflowSourceContext): string {
+  const insights: string[] = [];
+  
+  insights.push(`## 📋 Workflow Analysis: ${context.workflowName}`);
+  insights.push(`**Repository:** ${context.organization}/${context.repo}`);
+  insights.push(`**Path:** \`${context.workflowPath}\``);
+  insights.push('');
+  
+  // Triggers
+  insights.push(`### Triggers`);
+  insights.push(context.staticAnalysis.triggers.length > 0 
+    ? context.staticAnalysis.triggers.map(t => `- \`${t}\``).join('\n')
+    : '- No triggers detected');
+  insights.push('');
+  
+  // Jobs Summary
+  insights.push(`### Jobs (${context.staticAnalysis.jobs.length})`);
+  if (context.staticAnalysis.jobs.length > 0) {
+    insights.push('| Job | Runner | Steps | Cache | Concurrency | Timeout |');
+    insights.push('|-----|--------|-------|-------|-------------|---------|');
+    for (const job of context.staticAnalysis.jobs) {
+      insights.push(`| ${job.name} | ${job.runsOn} | ${job.steps} | ${job.hasCache ? '✅' : '❌'} | ${job.hasConcurrency ? '✅' : '❌'} | ${job.hasTimeout ? '✅' : '❌'} |`);
+    }
+  }
+  insights.push('');
+  
+  // Issues
+  if (context.staticAnalysis.issues.length > 0) {
+    insights.push(`### 🚨 Issues Found (${context.staticAnalysis.issues.length})`);
+    for (const issue of context.staticAnalysis.issues) {
+      const icon = issue.severity === 'high' ? '🔴' : issue.severity === 'medium' ? '🟡' : '🟢';
+      insights.push(`${icon} **[${issue.category.toUpperCase()}]** ${issue.message}`);
+      if (issue.suggestion) {
+        insights.push(`   → ${issue.suggestion}`);
+      }
+    }
+    insights.push('');
+  }
+  
+  // Optimizations
+  if (context.staticAnalysis.optimizations.length > 0) {
+    insights.push(`### ⚡ Optimization Opportunities`);
+    for (const opt of context.staticAnalysis.optimizations) {
+      const impact = opt.impact === 'high' ? '🔥 High Impact' : opt.impact === 'medium' ? '⚡ Medium Impact' : '💡 Low Impact';
+      insights.push(`#### ${opt.type} (${impact})`);
+      insights.push(opt.description);
+      if (opt.codeExample) {
+        insights.push('```yaml');
+        insights.push(opt.codeExample);
+        insights.push('```');
+      }
+      insights.push('');
+    }
+  }
+  
+  // Show actual source code snippet
+  insights.push(`### 📄 Source Code Preview`);
+  const sourceLines = context.content.split('\n').slice(0, 50);
+  insights.push('```yaml');
+  insights.push(sourceLines.join('\n'));
+  if (context.content.split('\n').length > 50) {
+    insights.push('# ... (truncated)');
+  }
+  insights.push('```');
+  
+  return insights.join('\n');
+}
+
+/**
+ * Generate workflow source analysis using GitHub Copilot or fallback to static
+ */
+export async function generateWorkflowSourceInsights(context: WorkflowSourceContext): Promise<AIInsightResult> {
+  const config = getConfig();
+  
+  // Prepare summary data for the prompt
+  const triggersFormatted = context.staticAnalysis.triggers.join(', ') || 'none detected';
+  const jobsCount = context.staticAnalysis.jobs.length;
+  
+  const jobsSummary = context.staticAnalysis.jobs.map(j => 
+    `- **${j.name}**: runs-on \`${j.runsOn}\`, ${j.steps} steps, cache=${j.hasCache}, concurrency=${j.hasConcurrency}`
+  ).join('\n') || 'No jobs detected';
+  
+  const issuesSummary = context.staticAnalysis.issues.map(i =>
+    `- [${i.severity.toUpperCase()}] ${i.message}${i.suggestion ? ` → ${i.suggestion}` : ''}`
+  ).join('\n') || 'No issues detected by static analysis';
+  
+  const optimizationsSummary = context.staticAnalysis.optimizations.map(o =>
+    `- **${o.type}** (${o.impact} impact): ${o.description}`
+  ).join('\n') || 'No optimizations suggested by static analysis';
+  
+  if (!config.enabled) {
+    return {
+      success: true,
+      insights: generateStaticWorkflowInsights(context),
+      provider: 'static',
+      model: 'none',
+      cached: false,
+    };
+  }
+  
+  try {
+    const promptContext = {
+      ...context,
+      triggersFormatted,
+      jobsCount,
+      jobsSummary,
+      issuesSummary,
+      optimizationsSummary,
+      // Truncate content if too long (keep first 300 lines max for token limits)
+      content: context.content.split('\n').slice(0, 300).join('\n'),
+    };
+    
+    const prompt = renderTemplate(WORKFLOW_SOURCE_PROMPT, promptContext);
+    const insights = await callGitHubCopilot(prompt, SYSTEM_PROMPT, config);
+    
+    return {
+      success: true,
+      insights: `### 🤖 AI-Powered Workflow Analysis\n> Powered by GitHub Copilot 🚀 | Analyzed actual source code\n\n${insights}`,
+      provider: 'GitHub Copilot',
+      model: config.model,
+      cached: false,
+    };
+  } catch (error) {
+    console.error('AI Advisor error:', error);
+    return {
+      success: false,
+      insights: generateStaticWorkflowInsights(context),
+      provider: 'static (fallback)',
+      model: 'none',
+      cached: false,
+      error: error instanceof Error ? error.message : String(error),
+    };
+  }
+}
