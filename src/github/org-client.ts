@@ -1766,7 +1766,11 @@ export class GitHubOrgClient {
     const sinceISO = since.toISOString();
 
     if (repoName) {
-      return this.getRepoIssueMetrics(orgName, repoName, sinceISO, labelFilter);
+      // Get raw issue data for the specific repo, then analyze it
+      const repoData = await this.getRepoIssueMetrics(orgName, repoName, sinceISO, labelFilter);
+      const result = this.analyzeIssues(repoData.issues, timeframe);
+      result.repo = repoData.repo;
+      return result;
     }
 
     // Get issues across org (sample from top repos)
@@ -2022,8 +2026,9 @@ export class GitHubOrgClient {
     prMetrics: any
   ): number {
     // Estimate: bugs / merged PRs
-    const bugs = issueMetrics.summary.bugCount || 0;
-    const merged = prMetrics.summary.totalMerged || 1;
+    // Add null-safety for issueMetrics.summary
+    const bugs = issueMetrics?.summary?.bugCount || 0;
+    const merged = prMetrics?.summary?.totalMerged || 1;
     return Math.round((bugs / merged) * 100);
   }
 

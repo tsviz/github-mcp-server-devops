@@ -676,6 +676,68 @@ npm start
 
 </details>
 
+## 🤖 Automating DevOps Reports with GitHub Actions
+
+You can automate DevOps report generation using [GitHub Copilot CLI](https://docs.github.com/en/enterprise-cloud@latest/copilot/how-tos/use-copilot-agents/use-copilot-cli) with ActionsPulse MCP server in a GitHub Actions workflow. This enables scheduled weekly reports, on-demand analysis, and automatic issue creation with insights.
+
+### How It Works
+
+1. **Install Copilot CLI** in the workflow runner
+2. **Configure ActionsPulse MCP** with your GitHub token
+3. **Run Copilot** with a prompt to generate reports using MCP tools
+4. **Create issues** with the generated report
+
+### Example Workflow
+
+See [`.github/workflows/weekly-devops-report.yml`](.github/workflows/weekly-devops-report.yml) for a complete working example.
+
+<details>
+<summary>📄 Key workflow steps</summary>
+
+```yaml
+- name: Setup MCP config
+  env:
+    GITHUB_TOKEN: ${{ secrets.GH_PAT_DEVOPS }}
+  run: |
+    mkdir -p ~/.copilot
+    printf '%s\n' '{
+      "mcpServers": {
+        "actions-pulse": {
+          "command": "docker",
+          "args": ["run", "-i", "--rm", "-e", "GITHUB_TOKEN='"$GITHUB_TOKEN"'", "-e", "GITHUB_ORG=your-org", "ghcr.io/tsviz/actions-pulse:latest"],
+          "tools": ["*"]
+        }
+      }
+    }' > ~/.copilot/mcp-config.json
+
+- name: Generate DevOps Report
+  env:
+    GITHUB_TOKEN: ${{ secrets.GH_PAT_DEVOPS }}
+    GH_TOKEN: ${{ secrets.GH_PAT_DEVOPS }}
+  run: |
+    copilot --yolo \
+      --disable-builtin-mcps \
+      --additional-mcp-config @$HOME/.copilot/mcp-config.json \
+      --prompt "Use the actions-pulse MCP tools to generate a DevOps report..."
+```
+
+</details>
+
+### Key Copilot CLI Flags
+
+| Flag | Description |
+|------|-------------|
+| `--yolo` | Auto-approve all tool calls (no confirmation prompts) |
+| `--disable-builtin-mcps` | Disable built-in MCP servers (use only custom ones) |
+| `--additional-mcp-config @<file>` | Load MCP server config from file (use `$HOME` not `~`) |
+| `--prompt "<text>"` | The prompt for Copilot to execute |
+
+### Tips
+
+- **Use `$HOME` instead of `~`** in the config path — tilde is not expanded in `@file` arguments
+- **Embed the token in args** — the `env` block in MCP config doesn't pass variables to Docker
+- **Include `"tools": ["*"]`** in your MCP config — this field is required
+
 ## 📚 Documentation
 
 | Document | Description |

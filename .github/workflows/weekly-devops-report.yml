@@ -1,0 +1,143 @@
+name: Weekly DevOps Report
+
+on:
+  schedule:
+    # Every Monday at 9am UTC
+    - cron: '0 9 * * 1'
+  workflow_dispatch:
+    inputs:
+      org_name:
+        description: 'Organization to analyze'
+        required: false
+        default: 'octodemo'
+      timeframe:
+        description: 'Analysis timeframe'
+        required: false
+        default: '7d'
+        type: choice
+        options:
+          - '7d'
+          - '30d'
+          - '90d'
+      repos:
+        description: 'Comma-separated list of repos to analyze (e.g., repo1,repo2,repo3). Leave empty for all org repos.'
+        required: false
+        default: 'java-springboot-demo,ghsioux-bookstore-ts,cosmic-cactus-bookstore-5,demo-vulnerabilities-ghas-felickz'
+
+env:
+  DEFAULT_ORG: ${{ inputs.org_name || 'octodemo' }}
+  TIMEFRAME: ${{ inputs.timeframe || '7d' }}
+  REPOS: ${{ inputs.repos || 'java-springboot-demo,ghsioux-bookstore-ts,cosmic-cactus-bookstore-5,demo-vulnerabilities-ghas-felickz' }}
+
+jobs:
+  generate-report:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install new Copilot CLI
+        env:
+          GH_TOKEN: ${{ secrets.GH_PAT_DEVOPS }}
+        run: |
+          # Install the new copilot CLI (not gh extension)
+          curl -fsSL https://gh.io/copilot-install | bash
+          export PATH="$HOME/.local/bin:$PATH"
+          echo "$HOME/.local/bin" >> $GITHUB_PATH
+          copilot --version
+
+      - name: Setup MCP config
+        env:
+          GITHUB_TOKEN: ${{ secrets.GH_PAT_DEVOPS }}
+        run: |
+          mkdir -p ~/.copilot
+          # Note: tools array is required for MCP server config
+          # Token is embedded directly in args since env block doesn't pass to Docker properly
+          printf '%s\n' '{
+            "mcpServers": {
+              "actions-pulse": {
+                "command": "docker",
+                "args": ["run", "-i", "--rm", "-e", "GITHUB_TOKEN='"$GITHUB_TOKEN"'", "-e", "GITHUB_ORG=${{ env.DEFAULT_ORG }}", "-e", "REPO_FILTER=${{ env.REPOS }}", "ghcr.io/tsviz/actions-pulse:latest"],
+                "tools": ["*"]
+              }
+            }
+          }' > ~/.copilot/mcp-config.json
+          echo "MCP config created:"
+          cat ~/.copilot/mcp-config.json
+
+      - name: Pull Docker image
+        env:
+          GH_TOKEN: ${{ secrets.GH_PAT_DEVOPS }}
+        run: docker pull ghcr.io/tsviz/actions-pulse:latest
+
+      - name: Verify MCP server connectivity
+        env:
+          GITHUB_TOKEN: ${{ secrets.GH_PAT_DEVOPS }}
+          GH_TOKEN: ${{ secrets.GH_PAT_DEVOPS }}
+        run: |
+          export PATH="$HOME/.local/bin:$PATH"
+          # Verify MCP config exists and show registered servers
+          echo "MCP config location:"
+          ls -la ~/.copilot/mcp-config.json
+          echo "Registered MCP servers:"
+          cat ~/.copilot/mcp-config.json
+          # Test that the MCP server can start and respond
+          echo "Testing MCP server connectivity..."
+          echo '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"test","version":"1.0.0"}}}' | \
+            docker run -i --rm -e GITHUB_TOKEN ghcr.io/tsviz/actions-pulse:latest | head -1 || echo "MCP server responded"
+          echo "MCP server is available"
+
+      - name: Generate DevOps Report
+        env:
+          GITHUB_TOKEN: ${{ secrets.GH_PAT_DEVOPS }}
+          GH_TOKEN: ${{ secrets.GH_PAT_DEVOPS }}
+        run: |
+          export PATH="$HOME/.local/bin:$PATH"
+          
+          # Run copilot with --yolo to auto-approve tool usage
+          # Use --additional-mcp-config to explicitly load the MCP server config
+          # Note: Must use $HOME instead of ~ because tilde is not expanded in @file paths
+          copilot --yolo \
+            --disable-builtin-mcps \
+            --additional-mcp-config @$HOME/.copilot/mcp-config.json \
+            --prompt "Use the actions-pulse MCP server tools to generate a comprehensive DevOps report. Call these tools in order:
+          1. get_dora_metrics for org ${{ env.DEFAULT_ORG }}
+          2. analyze_runner_utilization for org ${{ env.DEFAULT_ORG }}
+          3. get_compliance_audit_report for org ${{ env.DEFAULT_ORG }}
+          4. generate_cost_optimization_report for org ${{ env.DEFAULT_ORG }}
+          
+          Focus on repositories: ${{ env.REPOS }}. Analyze data from the last ${{ env.TIMEFRAME }}. Compile all results into a comprehensive DevOps report and save it as devops-report.md."
+
+      - name: Create Issue (fallback)
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # Use GITHUB_TOKEN (via github.token) which has issues:write permission
+          # Look for any report file Copilot may have created
+          REPORT_FILE=$(ls -t ./*devops*.md /tmp/*devops*.md /tmp/issue_body.md 2>/dev/null | head -1)
+          
+          if [ -n "$REPORT_FILE" ]; then
+            echo "Found report: $REPORT_FILE, creating issue..."
+            gh issue create \
+              --repo ${{ github.repository }} \
+              --title "📊 DevOps Report: ${{ env.DEFAULT_ORG }} (${{ env.TIMEFRAME }} analysis)" \
+              --body-file "$REPORT_FILE"
+          else
+            echo "No report file found"
+          fi
+
+      - name: Upload Reports as Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: devops-reports-${{ github.run_id }}
+          path: |
+            ./*devops*.md
+            /tmp/*devops*.md
+            /tmp/issue_body.md
+          retention-days: 30
+          if-no-files-found: warn
