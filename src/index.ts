@@ -533,6 +533,72 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
       },
     },
     // ============================================
+    // Database Migration Tools
+    // ============================================
+    {
+      name: 'detect_database_migrations',
+      description: `Detect and analyze database migration files across repositories. Identifies migration tools (Flyway, Liquibase, EF Core, Prisma, etc.), build configurations, and workflow integrations.${defaultOrg ? ` (default org: ${defaultOrg})` : ''}`,
+      inputSchema: {
+        type: 'object' as const,
+        properties: {
+          org_name: { type: 'string', description: `Organization name${defaultOrg ? ` (default: ${defaultOrg})` : ''}` },
+          repo_name: { type: 'string', description: 'Specific repository to scan (required)' },
+          include_content: { type: 'boolean', description: 'Include migration file content in response (default: false)' },
+        },
+        required: defaultOrg ? ['repo_name'] : ['org_name', 'repo_name'],
+      },
+    },
+    {
+      name: 'validate_migration_policies',
+      description: `Validate database migration files against configured policies. Checks for forbidden DBA operations, restricted operations, naming conventions, and best practices.${defaultOrg ? ` (default org: ${defaultOrg})` : ''}`,
+      inputSchema: {
+        type: 'object' as const,
+        properties: {
+          org_name: { type: 'string', description: `Organization name${defaultOrg ? ` (default: ${defaultOrg})` : ''}` },
+          repo_name: { type: 'string', description: 'Repository to validate (required)' },
+          environment: { type: 'string', enum: ['development', 'staging', 'production'], description: 'Target environment for validation (default: development)' },
+          migration_path: { type: 'string', description: 'Specific migration file path to validate (optional, validates all if not provided)' },
+        },
+        required: defaultOrg ? ['repo_name'] : ['org_name', 'repo_name'],
+      },
+    },
+    {
+      name: 'list_migration_policies',
+      description: `List all configured database migration policies. Shows forbidden operations, restricted operations, requirements, and environment-specific rules.`,
+      inputSchema: {
+        type: 'object' as const,
+        properties: {
+          policy_name: { type: 'string', description: 'Get details for a specific policy' },
+        },
+        required: [],
+      },
+    },
+    {
+      name: 'get_migration_summary',
+      description: `Get a summary of database migrations detected across repositories. Shows migration tools in use, policy compliance status, and risk assessments.${defaultOrg ? ` (default org: ${defaultOrg})` : ''}`,
+      inputSchema: {
+        type: 'object' as const,
+        properties: {
+          org_name: { type: 'string', description: `Organization name${defaultOrg ? ` (default: ${defaultOrg})` : ''}` },
+          repo_filter: { type: 'string', description: 'Comma-separated list of repositories to include (optional)' },
+        },
+        required: defaultOrg ? [] : ['org_name'],
+      },
+    },
+    {
+      name: 'analyze_migration_pipeline',
+      description: `Analyze CI/CD workflows for database migration safety best practices. Checks for validation steps, backups, approval gates, dry-runs, and proper stage separation.${defaultOrg ? ` (default org: ${defaultOrg})` : ''}`,
+      inputSchema: {
+        type: 'object' as const,
+        properties: {
+          org_name: { type: 'string', description: `Organization name${defaultOrg ? ` (default: ${defaultOrg})` : ''}` },
+          repo_name: { type: 'string', description: 'Repository to analyze (required)' },
+          workflow_path: { type: 'string', description: 'Specific workflow file to analyze (optional, analyzes all if not provided)' },
+        },
+        required: defaultOrg ? ['repo_name'] : ['org_name', 'repo_name'],
+      },
+    },
+    // ============================================
     // Report Generation Tool
     // ============================================
     {
@@ -1298,6 +1364,781 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           }
           output += '\n';
         }
+
+        return {
+          content: [{
+            type: 'text',
+            text: output,
+          }],
+        };
+      }
+
+      // ============================================
+      // Database Migration Tools
+      // ============================================
+      case 'detect_database_migrations': {
+        const orgName = getOrgName(args);
+        const repoName = (args as any).repo_name;
+        const includeContent = (args as any).include_content === true;
+
+        if (!repoName) {
+          return {
+            content: [{
+              type: 'text',
+              text: '❌ Repository name is required. Please provide `repo_name` parameter.',
+            }],
+          };
+        }
+
+        // Import migration detector dynamically
+        const { migrationDetector } = await import('./migrations/index.js');
+
+        // Define migration paths to search
+        const allMigrationPaths = [
+          // Flyway
+          'src/main/resources/db/migration',
+          'db/migration',
+          'flyway/migrations',
+          // Liquibase
+          'src/main/resources/db/changelog',
+          'db/changelog',
+          // Alembic
+          'alembic/versions',
+          'migrations/versions',
+          // Prisma
+          'prisma/migrations',
+          // Knex/TypeORM/Sequelize
+          'migrations',
+          'db/migrations',
+          'src/migrations',
+          // Rails
+          'db/migrate',
+          // .NET
+          'Migrations',
+          'Data/Migrations',
+        ];
+
+        // Fetch build config files to detect migration tool
+        const buildConfigs = await githubClient.getBuildConfigFiles(orgName, repoName);
+        
+        let detectedTool: string = 'unknown';
+        let detectedBuildSystem: string = 'unknown';
+        let pluginVersion: string | null = null;
+
+        // Analyze build configs for migration plugins
+        for (const config of buildConfigs.configs) {
+          const detection = migrationDetector.detectMigrationToolFromBuildConfig(config.content, config.name);
+          if (detection) {
+            detectedTool = detection.tool;
+            detectedBuildSystem = detection.buildSystem;
+            pluginVersion = detection.pluginVersion;
+            break;
+          }
+        }
+
+        // Fetch migration files
+        const migrationResult = await githubClient.getMigrationFiles(orgName, repoName, allMigrationPaths);
+
+        // Check workflows for migration commands
+        const workflowResult = await githubClient.getWorkflowFileContent(orgName, repoName);
+        const workflowMigrations: Array<{ workflow: string; command: string; stage: string }> = [];
+        
+        for (const workflow of workflowResult.workflows) {
+          const detected = migrationDetector.detectMigrationInWorkflow(workflow.content);
+          for (const migration of detected) {
+            workflowMigrations.push({
+              workflow: workflow.path,
+              command: migration.command,
+              stage: migration.stage,
+            });
+            // Update detected tool if not found in build config
+            if (detectedTool === 'unknown') {
+              detectedTool = detected[0]?.command?.toLowerCase().includes('flyway') ? 'flyway' :
+                            detected[0]?.command?.toLowerCase().includes('liquibase') ? 'liquibase' :
+                            detected[0]?.command?.toLowerCase().includes('prisma') ? 'prisma' :
+                            detected[0]?.command?.toLowerCase().includes('ef') ? 'efcore' : 'unknown';
+            }
+          }
+        }
+
+        // Calculate confidence
+        const hasMigrationFiles = migrationResult.files.length > 0;
+        const hasWorkflowCommand = workflowMigrations.length > 0;
+        const hasBuildPlugin = detectedTool !== 'unknown';
+        const confidence = migrationDetector.calculateConfidence(
+          hasBuildPlugin,
+          hasMigrationFiles,
+          hasWorkflowCommand,
+          migrationResult.files.length
+        );
+
+        // Analyze migration files for operations
+        const fileAnalysis: Array<{
+          file: string;
+          version: string | null;
+          description: string | null;
+          operations: number;
+          riskLevel: string;
+        }> = [];
+
+        for (const file of migrationResult.files) {
+          const parsed = migrationDetector.parseMigrationFileName(file.name, detectedTool as any);
+          const operations = migrationDetector.detectSQLOperations(file.content);
+          const maxRisk = operations.reduce((max, op) => {
+            const riskOrder = { low: 0, medium: 1, high: 2, critical: 3 };
+            return riskOrder[op.riskLevel] > riskOrder[max as keyof typeof riskOrder] ? op.riskLevel : max;
+          }, 'low');
+
+          fileAnalysis.push({
+            file: file.path,
+            version: parsed.version,
+            description: parsed.description,
+            operations: operations.length,
+            riskLevel: maxRisk,
+          });
+        }
+
+        // Build output
+        let output = `## 🗄️ Database Migration Detection\n\n`;
+        output += `**Repository:** ${orgName}/${repoName}\n`;
+        output += `**Detection Confidence:** ${confidence}\n\n`;
+
+        output += `### 🔍 Detection Summary\n`;
+        output += `| Property | Value |\n|:---------|:------|\n`;
+        output += `| Migration Tool | ${detectedTool} |\n`;
+        output += `| Build System | ${detectedBuildSystem} |\n`;
+        if (pluginVersion) {
+          output += `| Plugin Version | ${pluginVersion} |\n`;
+        }
+        output += `| Migration Path | ${migrationResult.detectedPath || 'Not found'} |\n`;
+        output += `| Migration Files | ${migrationResult.files.length} |\n`;
+        output += `| Workflow Integrations | ${workflowMigrations.length} |\n\n`;
+
+        if (fileAnalysis.length > 0) {
+          output += `### 📁 Migration Files\n`;
+          output += `| File | Version | Description | Operations | Risk |\n`;
+          output += `|:-----|:--------|:------------|:-----------|:-----|\n`;
+          for (const file of fileAnalysis.slice(0, 15)) {
+            const riskEmoji = file.riskLevel === 'critical' ? '🔴' : 
+                             file.riskLevel === 'high' ? '🟠' : 
+                             file.riskLevel === 'medium' ? '🟡' : '🟢';
+            output += `| ${file.file.split('/').pop()} | ${file.version || '-'} | ${file.description || '-'} | ${file.operations} | ${riskEmoji} ${file.riskLevel} |\n`;
+          }
+          if (fileAnalysis.length > 15) {
+            output += `\n_...and ${fileAnalysis.length - 15} more files_\n`;
+          }
+          output += '\n';
+        }
+
+        if (workflowMigrations.length > 0) {
+          output += `### ⚙️ Workflow Integrations\n`;
+          for (const wf of workflowMigrations) {
+            output += `- **${wf.workflow}**: \`${wf.command}\` (${wf.stage})\n`;
+          }
+          output += '\n';
+        }
+
+        if (buildConfigs.configs.length > 0) {
+          output += `### 📦 Build Configurations Found\n`;
+          for (const config of buildConfigs.configs) {
+            output += `- ${config.path} (${config.type})\n`;
+          }
+        }
+
+        return {
+          content: [{
+            type: 'text',
+            text: output,
+          }],
+        };
+      }
+
+      case 'validate_migration_policies': {
+        const orgName = getOrgName(args);
+        const repoName = (args as any).repo_name;
+        const environment = (args as any).environment || 'development';
+        const migrationPath = (args as any).migration_path;
+
+        if (!repoName) {
+          return {
+            content: [{
+              type: 'text',
+              text: '❌ Repository name is required. Please provide `repo_name` parameter.',
+            }],
+          };
+        }
+
+        // Import migration modules
+        const { migrationDetector, migrationValidator, getAllMigrationPaths } = await import('./migrations/index.js');
+
+        // Load migration policies from config
+        const config = configLoader.getConfig();
+        if (config?.migrationPolicies && config.migrationPolicies.length > 0) {
+          await migrationValidator.loadPolicies(config.migrationPolicies as any);
+        }
+
+        // First, detect the migration tool and its paths from build configs
+        const buildConfigs = await githubClient.getBuildConfigFiles(orgName, repoName);
+        let detectedTool: any = 'unknown';
+        let detectedMigrationPaths: string[] = [];
+
+        for (const cfg of buildConfigs.configs) {
+          const detection = migrationDetector.detectMigrationToolFromBuildConfig(cfg.content, cfg.name);
+          if (detection) {
+            detectedTool = detection.tool;
+            detectedMigrationPaths = detection.migrationPaths || [];
+            break;
+          }
+        }
+
+        // Use detected paths first, then fall back to all common paths
+        const pathsToSearch = detectedMigrationPaths.length > 0
+          ? [...detectedMigrationPaths, ...getAllMigrationPaths()]
+          : getAllMigrationPaths();
+
+        const migrationResult = await githubClient.getMigrationFiles(orgName, repoName, pathsToSearch);
+
+        if (migrationResult.files.length === 0) {
+          return {
+            content: [{
+              type: 'text',
+              text: `## 📋 Migration Policy Validation\n\n**Repository:** ${orgName}/${repoName}\n**Detected Tool:** ${detectedTool}\n\n⚠️ No migration files found.\n\n**Paths searched:**\n${pathsToSearch.slice(0, 10).map(p => `- \`${p}\``).join('\n')}${pathsToSearch.length > 10 ? `\n- ... and ${pathsToSearch.length - 10} more` : ''}\n\n💡 If migrations exist elsewhere, use \`migration_path\` parameter to specify the location.`,
+            }],
+          };
+        }
+
+        // Set default database assumption
+        const database: any = 'postgresql';
+
+        // Validate each migration file
+        const validationResults: Array<{
+          file: string;
+          isValid: boolean;
+          violations: number;
+          warnings: number;
+          riskLevel: string;
+          criticalIssues: string[];
+        }> = [];
+
+        let totalViolations = 0;
+        let totalWarnings = 0;
+        let criticalCount = 0;
+
+        const filesToValidate = migrationPath 
+          ? migrationResult.files.filter(f => f.path.includes(migrationPath))
+          : migrationResult.files;
+
+        for (const file of filesToValidate) {
+          const result = await migrationValidator.validateSQL(
+            file.content,
+            environment,
+            {
+              repository: `${orgName}/${repoName}`,
+              migrationFile: file.path,
+              migrationTool: detectedTool,
+              database,
+              hasRollback: false, // TODO: detect rollback files
+              inTransaction: file.content.toLowerCase().includes('begin'),
+            }
+          );
+
+          const criticalViolations = result.violations.filter(v => v.severity === 'critical');
+          
+          validationResults.push({
+            file: file.path,
+            isValid: result.isValid,
+            violations: result.violations.length,
+            warnings: result.warnings.length,
+            riskLevel: result.riskAssessment.level,
+            criticalIssues: criticalViolations.map(v => v.message),
+          });
+
+          totalViolations += result.violations.length;
+          totalWarnings += result.warnings.length;
+          if (criticalViolations.length > 0) criticalCount++;
+        }
+
+        // Build output
+        let output = `## 🔍 Migration Policy Validation\n\n`;
+        output += `**Repository:** ${orgName}/${repoName}\n`;
+        output += `**Environment:** ${environment}\n`;
+        output += `**Files Validated:** ${filesToValidate.length}\n\n`;
+
+        // Summary
+        const passedCount = validationResults.filter(r => r.isValid).length;
+        const passRate = filesToValidate.length > 0 
+          ? Math.round((passedCount / filesToValidate.length) * 100) 
+          : 0;
+
+        output += `### 📊 Summary\n`;
+        output += `| Metric | Value |\n|:-------|:------|\n`;
+        output += `| Pass Rate | ${passRate}% (${passedCount}/${filesToValidate.length}) |\n`;
+        output += `| Total Violations | ${totalViolations} |\n`;
+        output += `| Total Warnings | ${totalWarnings} |\n`;
+        output += `| Critical Issues | ${criticalCount} |\n\n`;
+
+        // Validation results table
+        output += `### 📋 Validation Results\n`;
+        output += `| File | Status | Violations | Warnings | Risk |\n`;
+        output += `|:-----|:-------|:-----------|:---------|:-----|\n`;
+        
+        for (const result of validationResults) {
+          const status = result.isValid ? '✅ Pass' : '❌ Fail';
+          const riskEmoji = result.riskLevel === 'critical' ? '🔴' : 
+                           result.riskLevel === 'high' ? '🟠' : 
+                           result.riskLevel === 'medium' ? '🟡' : '🟢';
+          output += `| ${result.file.split('/').pop()} | ${status} | ${result.violations} | ${result.warnings} | ${riskEmoji} ${result.riskLevel} |\n`;
+        }
+        output += '\n';
+
+        // Show critical issues
+        const criticalFiles = validationResults.filter(r => r.criticalIssues.length > 0);
+        if (criticalFiles.length > 0) {
+          output += `### 🚨 Critical Issues\n`;
+          for (const result of criticalFiles) {
+            output += `\n**${result.file.split('/').pop()}:**\n`;
+            for (const issue of result.criticalIssues) {
+              output += `- ❌ ${issue}\n`;
+            }
+          }
+          output += '\n';
+        }
+
+        // Policy info
+        const policySummary = migrationValidator.getPoliciesSummary();
+        output += `### 📜 Policies Applied\n`;
+        if (policySummary.policies.length > 0) {
+          for (const policy of policySummary.policies) {
+            output += `- **${policy.name}** v${policy.version}\n`;
+          }
+        } else {
+          output += `_Using default built-in policies_\n`;
+        }
+        output += `\n- Forbidden patterns: ${policySummary.forbiddenCount}\n`;
+        output += `- Restricted patterns: ${policySummary.restrictedCount}\n`;
+
+        return {
+          content: [{
+            type: 'text',
+            text: output,
+          }],
+        };
+      }
+
+      case 'list_migration_policies': {
+        const { migrationValidator } = await import('./migrations/index.js');
+        
+        // Load policies from config
+        const config = configLoader.getConfig();
+        if (config?.migrationPolicies && config.migrationPolicies.length > 0) {
+          await migrationValidator.loadPolicies(config.migrationPolicies as any);
+        }
+
+        const policyName = (args as any).policy_name;
+        const summary = migrationValidator.getPoliciesSummary();
+
+        if (summary.policies.length === 0) {
+          let output = `## 📜 Migration Policies\n\n`;
+          output += `⚠️ No custom migration policies loaded. Using **built-in default policies**.\n\n`;
+          output += `### Default Policy Summary\n`;
+          output += `- **${summary.forbiddenCount}** forbidden operation patterns (DBA-only operations)\n`;
+          output += `- **${summary.restrictedCount}** restricted operation patterns (require review)\n\n`;
+          output += `### Forbidden Operations (Built-in)\n`;
+          output += `| Operation | Severity | Reason |\n|:----------|:---------|:-------|\n`;
+          output += `| DROP DATABASE | Critical | Database drops must be performed by DBAs |\n`;
+          output += `| DROP SCHEMA | Critical | Schema drops require DBA intervention |\n`;
+          output += `| GRANT/REVOKE | Critical | Permission changes must be managed by DBAs |\n`;
+          output += `| CREATE/ALTER/DROP USER | Critical | User management must be managed by DBAs |\n`;
+          output += `| TRUNCATE TABLE | High | TRUNCATE operations require explicit approval |\n`;
+          output += `| ALTER SYSTEM | Critical | System-level changes are forbidden |\n`;
+          output += `| xp_cmdshell | Critical | OS command execution is forbidden |\n\n`;
+          output += `### Restricted Operations (Built-in)\n`;
+          output += `| Operation | Severity | Message |\n|:----------|:---------|:--------|\n`;
+          output += `| DROP TABLE | High | Table drops require DBA approval for production |\n`;
+          output += `| DROP COLUMN | High | Column drops are backwards-incompatible |\n`;
+          output += `| ALTER TYPE/MODIFY | Medium | Type changes may cause data loss |\n`;
+          output += `| CREATE INDEX (non-concurrent) | Medium | Use CONCURRENTLY to avoid locks (PostgreSQL) |\n\n`;
+          output += `💡 **Tip:** Create \`policies/migration-policies.yaml\` in your devops-config repo to customize policies.`;
+
+          return {
+            content: [{
+              type: 'text',
+              text: output,
+            }],
+          };
+        }
+
+        // Show loaded policies
+        if (policyName) {
+          const policy = config?.migrationPolicies?.find((p: any) => p.metadata.name === policyName);
+          if (!policy) {
+            return {
+              content: [{
+                type: 'text',
+                text: `❌ Policy "${policyName}" not found. Available policies: ${summary.policies.map(p => p.name).join(', ')}`,
+              }],
+            };
+          }
+
+          let output = `## 📜 Migration Policy: ${policy.metadata.name}\n\n`;
+          output += `**Version:** ${policy.metadata.version}\n`;
+          if (policy.metadata.description) {
+            output += `**Description:** ${policy.metadata.description}\n`;
+          }
+          output += '\n';
+
+          // Show spec details
+          if (policy.spec.forbidden?.operations) {
+            output += `### 🚫 Forbidden Operations\n`;
+            output += `| Pattern | Severity | Reason |\n|:--------|:---------|:-------|\n`;
+            for (const op of policy.spec.forbidden.operations) {
+              output += `| \`${op.pattern}\` | ${op.severity} | ${op.reason} |\n`;
+            }
+            output += '\n';
+          }
+
+          if (policy.spec.restricted?.operations) {
+            output += `### ⚠️ Restricted Operations\n`;
+            output += `| Pattern | Severity | Message |\n|:--------|:---------|:--------|\n`;
+            for (const op of policy.spec.restricted.operations) {
+              output += `| \`${op.pattern}\` | ${op.severity} | ${op.message} |\n`;
+            }
+            output += '\n';
+          }
+
+          if (policy.spec.environments) {
+            output += `### 🌍 Environment Rules\n`;
+            for (const [env, rules] of Object.entries(policy.spec.environments as Record<string, any>)) {
+              output += `\n**${env}:**\n`;
+              output += `- Enforcement: ${rules.enforcement}\n`;
+              output += `- Allow Destructive: ${rules.allowDestructive}\n`;
+              output += `- Require Approval: ${rules.requireApproval}\n`;
+              if (rules.requireRollback) output += `- Require Rollback: ${rules.requireRollback}\n`;
+            }
+          }
+
+          return {
+            content: [{
+              type: 'text',
+              text: output,
+            }],
+          };
+        }
+
+        // List all policies
+        let output = `## 📜 Migration Policies (${summary.policies.length})\n\n`;
+        for (const policy of summary.policies) {
+          output += `### ${policy.name}\n`;
+          output += `- Version: ${policy.version}\n`;
+          if (policy.description) {
+            output += `- Description: ${policy.description}\n`;
+          }
+          output += '\n';
+        }
+        output += `\n**Total Rules:**\n`;
+        output += `- Forbidden operations: ${summary.forbiddenCount}\n`;
+        output += `- Restricted operations: ${summary.restrictedCount}\n`;
+
+        return {
+          content: [{
+            type: 'text',
+            text: output,
+          }],
+        };
+      }
+
+      case 'get_migration_summary': {
+        const orgName = getOrgName(args);
+        const repoFilter = (args as any).repo_filter;
+
+        // Get repositories to scan
+        let reposToScan: string[] = [];
+        
+        if (repoFilter) {
+          reposToScan = repoFilter.split(',').map((r: string) => r.trim());
+        } else {
+          // Get from inventory or fetch first 10 repos
+          const config = configLoader.getConfig();
+          if (config?.repositoryInventory?.spec?.repositories) {
+            reposToScan = config.repositoryInventory.spec.repositories
+              .slice(0, 10)
+              .map(r => r.name.includes('/') ? r.name.split('/')[1] : r.name);
+          } else {
+            // Fetch repos from org (limited)
+            try {
+              const { data: repos } = await (githubClient as any).octokit.rest.repos.listForOrg({
+                org: orgName,
+                per_page: 10,
+                sort: 'updated',
+              });
+              reposToScan = repos.map((r: any) => r.name);
+            } catch {
+              return {
+                content: [{
+                  type: 'text',
+                  text: `## 🗄️ Migration Summary\n\n⚠️ Could not list repositories. Please provide \`repo_filter\` parameter with specific repositories to scan.`,
+                }],
+              };
+            }
+          }
+        }
+
+        const { migrationDetector } = await import('./migrations/index.js');
+
+        const migrationPaths = [
+          'src/main/resources/db/migration',
+          'db/migration',
+          'prisma/migrations',
+          'migrations',
+          'db/migrate',
+          'alembic/versions',
+        ];
+
+        // Scan each repo
+        const results: Array<{
+          repo: string;
+          hasMigrations: boolean;
+          tool: string;
+          fileCount: number;
+          hasWorkflowIntegration: boolean;
+        }> = [];
+
+        for (const repo of reposToScan.slice(0, 10)) {
+          try {
+            const migrationResult = await githubClient.getMigrationFiles(orgName, repo, migrationPaths);
+            const buildConfigs = await githubClient.getBuildConfigFiles(orgName, repo);
+            
+            let detectedTool = 'unknown';
+            for (const config of buildConfigs.configs) {
+              const detection = migrationDetector.detectMigrationToolFromBuildConfig(config.content, config.name);
+              if (detection) {
+                detectedTool = detection.tool;
+                break;
+              }
+            }
+
+            // Quick workflow check
+            const workflows = await githubClient.getWorkflowFileContent(orgName, repo);
+            let hasWorkflowIntegration = false;
+            for (const wf of workflows.workflows) {
+              if (migrationDetector.detectMigrationInWorkflow(wf.content).length > 0) {
+                hasWorkflowIntegration = true;
+                break;
+              }
+            }
+
+            results.push({
+              repo,
+              hasMigrations: migrationResult.files.length > 0,
+              tool: detectedTool,
+              fileCount: migrationResult.files.length,
+              hasWorkflowIntegration,
+            });
+          } catch {
+            results.push({
+              repo,
+              hasMigrations: false,
+              tool: 'error',
+              fileCount: 0,
+              hasWorkflowIntegration: false,
+            });
+          }
+        }
+
+        // Build summary
+        const withMigrations = results.filter(r => r.hasMigrations);
+        const byTool = withMigrations.reduce((acc, r) => {
+          acc[r.tool] = (acc[r.tool] || 0) + 1;
+          return acc;
+        }, {} as Record<string, number>);
+
+        let output = `## 🗄️ Database Migration Summary\n\n`;
+        output += `**Organization:** ${orgName}\n`;
+        output += `**Repositories Scanned:** ${results.length}\n\n`;
+
+        output += `### 📊 Overview\n`;
+        output += `| Metric | Value |\n|:-------|:------|\n`;
+        output += `| Repos with Migrations | ${withMigrations.length} |\n`;
+        output += `| Total Migration Files | ${results.reduce((sum, r) => sum + r.fileCount, 0)} |\n`;
+        output += `| With Workflow Integration | ${results.filter(r => r.hasWorkflowIntegration).length} |\n\n`;
+
+        if (Object.keys(byTool).length > 0) {
+          output += `### 🔧 Migration Tools in Use\n`;
+          output += `| Tool | Repositories |\n|:-----|:-------------|\n`;
+          for (const [tool, count] of Object.entries(byTool).sort((a, b) => b[1] - a[1])) {
+            output += `| ${tool} | ${count} |\n`;
+          }
+          output += '\n';
+        }
+
+        output += `### 📋 Repository Details\n`;
+        output += `| Repository | Migrations | Tool | Files | CI/CD |\n`;
+        output += `|:-----------|:-----------|:-----|:------|:------|\n`;
+        for (const r of results) {
+          const hasCI = r.hasWorkflowIntegration ? '✅' : '❌';
+          output += `| ${r.repo} | ${r.hasMigrations ? '✅' : '❌'} | ${r.tool} | ${r.fileCount} | ${hasCI} |\n`;
+        }
+
+        return {
+          content: [{
+            type: 'text',
+            text: output,
+          }],
+        };
+      }
+
+      case 'analyze_migration_pipeline': {
+        const orgName = getOrgName(args);
+        const repoName = (args as any).repo_name;
+        const workflowPath = (args as any).workflow_path;
+
+        if (!repoName) {
+          return {
+            content: [{
+              type: 'text',
+              text: '❌ Repository name is required. Please provide `repo_name` parameter.',
+            }],
+          };
+        }
+
+        const { migrationDetector } = await import('./migrations/index.js');
+
+        // Get build configs to detect migration tool and build system
+        const buildConfigs = await githubClient.getBuildConfigFiles(orgName, repoName);
+        let detectedTool: any = 'unknown';
+        let detectedBuildSystem: any = 'unknown';
+        let buildConfigContent = '';
+        
+        for (const cfg of buildConfigs.configs) {
+          const detection = migrationDetector.detectMigrationToolFromBuildConfig(cfg.content, cfg.name);
+          if (detection) {
+            detectedTool = detection.tool;
+            detectedBuildSystem = detection.buildSystem;
+            buildConfigContent = cfg.content;
+            break;
+          }
+        }
+
+        // Get workflow files
+        const workflows = await githubClient.getWorkflowFileContent(orgName, repoName);
+        
+        if (workflows.workflows.length === 0) {
+          return {
+            content: [{
+              type: 'text',
+              text: `## 🔒 Migration Pipeline Safety Analysis\n\n**Repository:** ${orgName}/${repoName}\n\n⚠️ No workflow files found in \`.github/workflows/\`.\n\n💡 Add CI/CD workflows to enable migration safety analysis.`,
+            }],
+          };
+        }
+
+        // Filter workflows if path specified
+        const workflowsToAnalyze = workflowPath 
+          ? workflows.workflows.filter(w => w.path.includes(workflowPath))
+          : workflows.workflows;
+
+        // Analyze each workflow
+        const analysisResults: Array<{
+          workflow: string;
+          hasMigration: boolean;
+          migrationMode: 'explicit' | 'build-integrated' | 'runtime' | 'none';
+          migrationModeDescription?: string;
+          safetyScore: number;
+          checks: Array<{
+            check: string;
+            status: 'pass' | 'fail' | 'warning';
+            description: string;
+            details?: string;
+          }>;
+          recommendations: string[];
+        }> = [];
+
+        let totalMigrationWorkflows = 0;
+        let totalSafetyScore = 0;
+
+        for (const wf of workflowsToAnalyze) {
+          // Pass build config content to detect runtime/build-integrated migrations
+          const analysis = migrationDetector.analyzeMigrationSafety(
+            wf.content, 
+            detectedTool,
+            buildConfigContent,
+            detectedBuildSystem
+          );
+          
+          if (analysis.hasMigration) {
+            totalMigrationWorkflows++;
+            totalSafetyScore += analysis.safetyScore;
+          }
+
+          analysisResults.push({
+            workflow: wf.path.split('/').pop() || wf.path,
+            hasMigration: analysis.hasMigration,
+            migrationMode: analysis.migrationMode,
+            migrationModeDescription: analysis.migrationModeDescription,
+            safetyScore: analysis.safetyScore,
+            checks: analysis.checks,
+            recommendations: analysis.recommendations,
+          });
+        }
+
+        // Build output
+        let output = `## 🔒 Migration Pipeline Safety Analysis\n\n`;
+        output += `**Repository:** ${orgName}/${repoName}\n`;
+        output += `**Detected Migration Tool:** ${detectedTool}\n`;
+        output += `**Build System:** ${detectedBuildSystem}\n`;
+        output += `**Workflows Analyzed:** ${workflowsToAnalyze.length}\n`;
+        output += `**Workflows with Migrations:** ${totalMigrationWorkflows}\n\n`;
+
+        if (totalMigrationWorkflows > 0) {
+          const avgScore = Math.round(totalSafetyScore / totalMigrationWorkflows);
+          const scoreEmoji = avgScore >= 80 ? '🟢' : avgScore >= 60 ? '🟡' : avgScore >= 40 ? '🟠' : '🔴';
+          output += `### 📊 Overall Safety Score: ${scoreEmoji} ${avgScore}%\n\n`;
+        }
+
+        // Show results for each workflow with migrations
+        const migrationWorkflows = analysisResults.filter(r => r.hasMigration);
+        
+        if (migrationWorkflows.length > 0) {
+          output += `### 🔍 Workflow Safety Checks\n\n`;
+          
+          for (const result of migrationWorkflows) {
+            const scoreEmoji = result.safetyScore >= 80 ? '🟢' : result.safetyScore >= 60 ? '🟡' : result.safetyScore >= 40 ? '🟠' : '🔴';
+            const modeLabel = result.migrationMode === 'explicit' ? '📋 Explicit' :
+                             result.migrationMode === 'build-integrated' ? '🔧 Build-Integrated' :
+                             result.migrationMode === 'runtime' ? '🚀 Runtime' : '';
+            output += `#### ${result.workflow} ${scoreEmoji} ${result.safetyScore}%\n\n`;
+            output += `**Migration Mode:** ${modeLabel}\n`;
+            if (result.migrationModeDescription) {
+              output += `> ${result.migrationModeDescription}\n`;
+            }
+            output += '\n';
+            output += `| Check | Status | Details |\n|:------|:-------|:--------|\n`;
+            
+            for (const check of result.checks) {
+              const statusEmoji = check.status === 'pass' ? '✅' : check.status === 'warning' ? '⚠️' : '❌';
+              output += `| ${check.description} | ${statusEmoji} | ${check.details || '-'} |\n`;
+            }
+            output += '\n';
+
+            if (result.recommendations.length > 0) {
+              output += `**Recommendations:**\n`;
+              for (const rec of result.recommendations) {
+                output += `- ${rec}\n`;
+              }
+              output += '\n';
+            }
+          }
+        } else {
+          output += `### ℹ️ No Migration Steps Detected\n\n`;
+          output += `No database migration commands were detected in the analyzed workflows.\n\n`;
+          output += `**Tip:** This tool looks for:\n`;
+          output += `- **Explicit commands:** \`flyway migrate\`, \`liquibase update\`, \`dotnet ef database update\`\n`;
+          output += `- **Build-integrated:** \`mvn package\`, \`./gradlew build\` (when Spring Boot + Liquibase/Flyway detected)\n`;
+          output += `- **Runtime migrations:** Spring Boot auto-runs Liquibase/Flyway on startup\n`;
+        }
+
+        // Static analysis disclaimer
+        output += `\n---\n`;
+        output += `📋 *This analysis is based on workflow YAML files. Compare with actual deployment runs and database state for complete assessment.*\n`;
 
         return {
           content: [{
@@ -2647,6 +3488,186 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           }
         }
 
+        // Generate Migration Best Practices Report (Advisory - does not affect scores)
+        interface MigrationRepoAnalysis {
+          repo: string;
+          tool: string;
+          buildSystem: string;
+          hasMigrations: boolean;
+          workflows: Array<{
+            name: string;
+            mode: string;
+            modeDescription: string;
+            safetyScore: number;
+            recommendations: string[];
+          }>;
+        }
+        
+        let migrationAnalysis: MigrationRepoAnalysis[] = [];
+        let allMigrationRecommendations: Array<{repo: string; workflow: string; rec: string}> = [];
+        
+        if (generateAll || requestedReports.includes('migrations')) {
+          try {
+            const { migrationDetector } = await import('./migrations/index.js');
+            
+            // Analyze each monitored repo for migrations
+            for (const repo of monitoredRepos.slice(0, 10)) {
+              const repoName = repo.name.includes('/') ? repo.name.split('/')[1] : repo.name;
+              try {
+                const buildConfigs = await githubClient.getBuildConfigFiles(orgName, repoName);
+                let detectedTool = 'none';
+                let detectedBuildSystem = 'unknown';
+                let buildConfigContent = '';
+                
+                for (const cfg of buildConfigs.configs) {
+                  const detection = migrationDetector.detectMigrationToolFromBuildConfig(cfg.content, cfg.name);
+                  if (detection) {
+                    detectedTool = detection.tool;
+                    detectedBuildSystem = detection.buildSystem;
+                    buildConfigContent = cfg.content;
+                    break;
+                  }
+                }
+                
+                if (detectedTool !== 'none' && detectedTool !== 'unknown') {
+                  const workflows = await githubClient.getWorkflowFileContent(orgName, repoName);
+                  const workflowAnalysis: MigrationRepoAnalysis['workflows'] = [];
+                  
+                  for (const wf of workflows.workflows) {
+                    const analysis = migrationDetector.analyzeMigrationSafety(
+                      wf.content,
+                      detectedTool as any,
+                      buildConfigContent,
+                      detectedBuildSystem as any
+                    );
+                    
+                    if (analysis.hasMigration) {
+                      workflowAnalysis.push({
+                        name: wf.path.split('/').pop() || wf.path,
+                        mode: analysis.migrationMode,
+                        modeDescription: analysis.migrationModeDescription || '',
+                        safetyScore: analysis.safetyScore,
+                        recommendations: analysis.recommendations,
+                      });
+                    }
+                  }
+                  
+                  migrationAnalysis.push({
+                    repo: repoName,
+                    tool: detectedTool,
+                    buildSystem: detectedBuildSystem,
+                    hasMigrations: workflowAnalysis.length > 0,
+                    workflows: workflowAnalysis,
+                  });
+                }
+              } catch {
+                // Skip repos we can't analyze
+              }
+            }
+            
+            // Collect all recommendations
+            const reposWithMigrations = migrationAnalysis.filter(r => r.tool !== 'none');
+            for (const repo of reposWithMigrations) {
+              for (const wf of repo.workflows) {
+                for (const rec of wf.recommendations) {
+                  allMigrationRecommendations.push({ repo: repo.repo, workflow: wf.name, rec });
+                }
+              }
+            }
+            
+            // Generate markdown report content
+            let migrationContent = `# 🗄️ Database Migration Best Practices\n\n`;
+            migrationContent += `> ℹ️ **Advisory Report** - These are suggestions to reduce deployment risk.\n`;
+            migrationContent += `> Passing pipelines indicate migrations execute successfully.\n`;
+            migrationContent += `> This report does not affect DevOps scores.\n\n`;
+            migrationContent += `**Generated:** ${reportDate}\n\n`;
+            migrationContent += `---\n\n`;
+            
+            if (reposWithMigrations.length === 0) {
+              migrationContent += `## No Migration Tools Detected\n\n`;
+              migrationContent += `No database migration tools (Flyway, Liquibase, EF Core, etc.) were detected in the analyzed repositories.\n`;
+            } else {
+              migrationContent += `## 📊 Migration Tools Overview\n\n`;
+              migrationContent += `| Repository | Tool | Build System | Pipelines with Migrations |\n`;
+              migrationContent += `|:-----------|:-----|:-------------|:--------------------------|\n`;
+              
+              for (const repo of reposWithMigrations) {
+                const pipelineCount = repo.workflows.length > 0 ? `${repo.workflows.length} workflow(s)` : 'None detected';
+                migrationContent += `| ${repo.repo} | ${repo.tool} | ${repo.buildSystem} | ${pipelineCount} |\n`;
+              }
+              
+              migrationContent += `\n---\n\n`;
+              
+              if (allMigrationRecommendations.length > 0) {
+                migrationContent += `## 💡 Suggestions to Reduce Risk\n\n`;
+                migrationContent += `These practices can help prevent issues during database migrations:\n\n`;
+                
+                const backupRecs = allMigrationRecommendations.filter(r => r.rec.toLowerCase().includes('backup'));
+                const previewRecs = allMigrationRecommendations.filter(r => r.rec.toLowerCase().includes('preview') || r.rec.toLowerCase().includes('sql'));
+                const otherRecs = allMigrationRecommendations.filter(r => 
+                  !r.rec.toLowerCase().includes('backup') && 
+                  !r.rec.toLowerCase().includes('preview') && 
+                  !r.rec.toLowerCase().includes('sql')
+                );
+                
+                if (backupRecs.length > 0) {
+                  migrationContent += `### 🔒 Database Backups\n\n`;
+                  migrationContent += `Consider adding backup steps before migrations run:\n\n`;
+                  const uniqueRepos = [...new Set(backupRecs.map(r => r.repo))];
+                  for (const repo of uniqueRepos) {
+                    migrationContent += `- **${repo}**: Add \`pg_dump\`, \`mysqldump\`, or cloud snapshot before migration\n`;
+                  }
+                  migrationContent += `\n`;
+                }
+                
+                if (previewRecs.length > 0) {
+                  migrationContent += `### 👁️ Migration Preview\n\n`;
+                  migrationContent += `Generate migration SQL for review before applying:\n\n`;
+                  for (const rec of previewRecs.slice(0, 5)) {
+                    migrationContent += `- **${rec.repo}** (${rec.workflow}): ${rec.rec}\n`;
+                  }
+                  migrationContent += `\n`;
+                }
+                
+                if (otherRecs.length > 0) {
+                  migrationContent += `### 📝 Other Suggestions\n\n`;
+                  for (const rec of otherRecs.slice(0, 5)) {
+                    migrationContent += `- **${rec.repo}**: ${rec.rec}\n`;
+                  }
+                  migrationContent += `\n`;
+                }
+              } else {
+                migrationContent += `## ✅ Good Practices Detected\n\n`;
+                migrationContent += `No critical migration safety suggestions at this time.\n`;
+              }
+              
+              const workflowsWithMigrations = reposWithMigrations.filter(r => r.workflows.length > 0);
+              if (workflowsWithMigrations.length > 0) {
+                migrationContent += `---\n\n## 📋 Pipeline Details\n\n`;
+                
+                for (const repo of workflowsWithMigrations) {
+                  migrationContent += `### ${repo.repo}\n\n`;
+                  migrationContent += `| Workflow | Mode | Description |\n`;
+                  migrationContent += `|:---------|:-----|:------------|\n`;
+                  
+                  for (const wf of repo.workflows) {
+                    const modeLabel = wf.mode === 'explicit' ? '📋 Explicit' :
+                                     wf.mode === 'build-integrated' ? '🔧 Build-Integrated' :
+                                     wf.mode === 'runtime' ? '🚀 Runtime' : '-';
+                    migrationContent += `| ${wf.name} | ${modeLabel} | ${wf.modeDescription || '-'} |\n`;
+                  }
+                  migrationContent += `\n`;
+                }
+              }
+            }
+            
+            writeFileSync(join(reportFolder, 'migration-best-practices.md'), migrationContent);
+            generatedReports.push('migration-best-practices.md');
+          } catch (err: any) {
+            console.error('Failed to generate migration report:', err.message);
+          }
+        }
+
         // Generate README index with Executive Dashboard
         let readmeContent = `# 📊 DevOps Insights Dashboard\n\n`;
         readmeContent += `**Organization:** ${orgName}  \n`;
@@ -3093,7 +4114,10 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           readmeContent += `| [💰 Cost Optimization](cost-optimization.md) | Usage analysis, optimization recommendations |\n`;
         }
         if (generatedReports.includes('compliance-security.md')) {
-          readmeContent += `| [🔒 Compliance & Security](compliance-security.md) | Security scanning, environment protection |\n`;
+          readmeContent += `| [🔒 Compliance & Security](compliance-security.md) | Compliance status, security scanning |\n`;
+        }
+        if (generatedReports.includes('migration-best-practices.md')) {
+          readmeContent += `| [🗄️ Migration Best Practices](migration-best-practices.md) | Database migration safety suggestions |\n`;
         }
         
         readmeContent += `\n---\n\n## 📖 Viewing Diagrams\n\n`;
@@ -3343,6 +4367,40 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
                 <div style="text-align: center; margin-top: 15px; color: #00d4ff; font-size: 0.9em;">View all insights →</div>
             </a>
         </div>
+        
+        <!-- Migration Best Practices Section (Advisory) -->
+        ${migrationAnalysis.length > 0 ? (() => {
+          const reposWithTools = migrationAnalysis.filter(r => r.tool !== 'none');
+          const totalPipelines = reposWithTools.reduce((sum, r) => sum + r.workflows.length, 0);
+          const uniqueTools = [...new Set(reposWithTools.map(r => r.tool))];
+          const toolsDisplay = uniqueTools.map(t => t.charAt(0).toUpperCase() + t.slice(1)).join(', ') || 'None';
+          const suggestionCount = allMigrationRecommendations.length;
+          
+          return `
+        <a href="migration-details.html" class="card clickable" style="margin-bottom: 20px; display: block; text-decoration: none; color: inherit;">
+            <h3>🗄️ Database Migration Practices <span style="font-size: 0.7em; background: rgba(168,85,247,0.2); color: #a855f7; padding: 4px 10px; border-radius: 12px; margin-left: 10px;">Advisory</span> <span class="arrow">→</span></h3>
+            <p style="color: #888; margin-bottom: 20px; font-size: 0.9em;">Suggestions to reduce deployment risk. Does not affect DevOps scores.</p>
+            <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 15px;">
+                <div style="text-align: center; padding: 20px; background: rgba(168, 85, 247, 0.08); border-radius: 12px;">
+                    <div style="font-size: 2.5em; color: #a855f7; margin-bottom: 5px;">${reposWithTools.length}</div>
+                    <div style="color: #888; font-size: 0.85em;">Repos with Migrations</div>
+                </div>
+                <div style="text-align: center; padding: 20px; background: rgba(34, 197, 94, 0.08); border-radius: 12px;">
+                    <div style="font-size: 2.5em; color: #22c55e; margin-bottom: 5px;">${totalPipelines}</div>
+                    <div style="color: #888; font-size: 0.85em;">Migration Pipelines</div>
+                </div>
+                <div style="text-align: center; padding: 20px; background: rgba(251, 191, 36, 0.08); border-radius: 12px;">
+                    <div style="font-size: 2.5em; color: #fbbf24; margin-bottom: 5px;">${suggestionCount}</div>
+                    <div style="color: #888; font-size: 0.85em;">Suggestions</div>
+                </div>
+                <div style="text-align: center; padding: 20px; background: rgba(6, 182, 212, 0.08); border-radius: 12px;">
+                    <div style="font-size: 1.2em; color: #06b6d4; margin-bottom: 5px; margin-top: 10px;">${toolsDisplay}</div>
+                    <div style="color: #888; font-size: 0.85em; margin-top: 10px;">Detected Tools</div>
+                </div>
+            </div>
+        </a>
+        `;
+        })() : ''}
         
         <!-- Recommendations Section -->
         <a href="maturity-details.html#recommendations" class="card clickable" style="margin-bottom: 20px; display: block; text-decoration: none; color: inherit;">
@@ -4744,6 +5802,167 @@ ${htmlFoot}`;
     </script>
 ${htmlFoot}`;
         writeFileSync(join(reportFolder, 'maturity-details.html'), maturityDetailsHtml);
+        
+        // Migration Details Page (Advisory)
+        if (migrationAnalysis.length > 0) {
+          const reposWithTools = migrationAnalysis.filter(r => r.tool !== 'none');
+          const totalPipelines = reposWithTools.reduce((sum, r) => sum + r.workflows.length, 0);
+          const uniqueTools = [...new Set(reposWithTools.map(r => r.tool))];
+          const suggestionCount = allMigrationRecommendations.length;
+          
+          const backupRecs = allMigrationRecommendations.filter(r => r.rec.toLowerCase().includes('backup'));
+          const previewRecs = allMigrationRecommendations.filter(r => r.rec.toLowerCase().includes('preview') || r.rec.toLowerCase().includes('sql'));
+          const otherRecs = allMigrationRecommendations.filter(r => 
+            !r.rec.toLowerCase().includes('backup') && 
+            !r.rec.toLowerCase().includes('preview') && 
+            !r.rec.toLowerCase().includes('sql')
+          );
+          
+          const migrationDetailsHtml = `${htmlHead('Database Migration Practices')}
+        <h1>🗄️ Database Migration Practices</h1>
+        <p class="subtitle">${orgName} • ${reportDate} • Advisory Report</p>
+        
+        <div style="background: linear-gradient(135deg, rgba(168,85,247,0.1) 0%, rgba(99,102,241,0.1) 100%); border: 1px solid rgba(168,85,247,0.3); border-radius: 12px; padding: 20px; margin-bottom: 30px;">
+            <div style="display: flex; align-items: center; gap: 10px; margin-bottom: 10px;">
+                <span style="font-size: 1.5em;">ℹ️</span>
+                <strong style="color: #a855f7;">Advisory Report</strong>
+            </div>
+            <p style="color: #888; margin: 0;">These are suggestions to reduce deployment risk. Passing pipelines indicate migrations execute successfully. This report does not affect DevOps scores.</p>
+        </div>
+        
+        <div class="metric-row">
+            <div class="metric-box" style="background: rgba(168, 85, 247, 0.1); border-left: 4px solid #a855f7;">
+                <div class="value" style="color: #a855f7;">${reposWithTools.length}</div>
+                <div class="label">Repositories with Migrations</div>
+            </div>
+            <div class="metric-box" style="background: rgba(34, 197, 94, 0.1); border-left: 4px solid #22c55e;">
+                <div class="value" style="color: #22c55e;">${totalPipelines}</div>
+                <div class="label">Migration Pipelines</div>
+            </div>
+            <div class="metric-box" style="background: rgba(251, 191, 36, 0.1); border-left: 4px solid #fbbf24;">
+                <div class="value" style="color: #fbbf24;">${suggestionCount}</div>
+                <div class="label">Suggestions</div>
+            </div>
+            <div class="metric-box" style="background: rgba(6, 182, 212, 0.1); border-left: 4px solid #06b6d4;">
+                <div class="value" style="color: #06b6d4; font-size: 1.5em;">${uniqueTools.length}</div>
+                <div class="label">Migration Tools</div>
+            </div>
+        </div>
+        
+        <div class="card" style="margin-bottom: 20px;">
+            <h3>📊 Detected Migration Tools</h3>
+            <table>
+                <thead>
+                    <tr><th>Repository</th><th>Tool</th><th>Build System</th><th>Pipelines</th></tr>
+                </thead>
+                <tbody>
+                    ${reposWithTools.map(r => `
+                    <tr>
+                        <td><a href="https://github.com/${orgName}/${r.repo}" target="_blank" style="color: #00d4ff;">${r.repo}</a></td>
+                        <td><span style="background: rgba(168,85,247,0.2); color: #a855f7; padding: 4px 10px; border-radius: 8px; font-size: 0.85em;">${r.tool.charAt(0).toUpperCase() + r.tool.slice(1)}</span></td>
+                        <td>${r.buildSystem}</td>
+                        <td>${r.workflows.length > 0 ? r.workflows.length + ' workflow(s)' : '<span style="color: #888;">None detected</span>'}</td>
+                    </tr>
+                    `).join('')}
+                </tbody>
+            </table>
+        </div>
+        
+        ${suggestionCount > 0 ? `
+        <div class="card" style="margin-bottom: 20px;">
+            <h3>💡 Suggestions to Reduce Risk</h3>
+            <p style="color: #888; margin-bottom: 20px;">These practices can help prevent issues during database migrations:</p>
+            
+            ${backupRecs.length > 0 ? `
+            <div style="margin-bottom: 25px;">
+                <h4 style="color: #22c55e; margin-bottom: 15px;">🔒 Database Backups</h4>
+                <p style="color: #888; margin-bottom: 10px;">Consider adding backup steps before migrations run:</p>
+                ${[...new Set(backupRecs.map(r => r.repo))].map(repo => `
+                <div style="padding: 12px 15px; background: rgba(34,197,94,0.05); border-left: 3px solid #22c55e; border-radius: 0 8px 8px 0; margin-bottom: 8px;">
+                    <strong>${repo}</strong>: Add <code style="background: rgba(255,255,255,0.1); padding: 2px 6px; border-radius: 4px;">pg_dump</code>, <code style="background: rgba(255,255,255,0.1); padding: 2px 6px; border-radius: 4px;">mysqldump</code>, or cloud snapshot before migration
+                </div>
+                `).join('')}
+            </div>
+            ` : ''}
+            
+            ${previewRecs.length > 0 ? `
+            <div style="margin-bottom: 25px;">
+                <h4 style="color: #06b6d4; margin-bottom: 15px;">👁️ Migration Preview</h4>
+                <p style="color: #888; margin-bottom: 10px;">Generate migration SQL for review before applying:</p>
+                ${previewRecs.slice(0, 5).map(rec => `
+                <div style="padding: 12px 15px; background: rgba(6,182,212,0.05); border-left: 3px solid #06b6d4; border-radius: 0 8px 8px 0; margin-bottom: 8px;">
+                    <strong>${rec.repo}</strong> <span style="color: #888;">(${rec.workflow})</span>: ${rec.rec}
+                </div>
+                `).join('')}
+            </div>
+            ` : ''}
+            
+            ${otherRecs.length > 0 ? `
+            <div>
+                <h4 style="color: #f59e0b; margin-bottom: 15px;">📝 Other Suggestions</h4>
+                ${otherRecs.slice(0, 5).map(rec => `
+                <div style="padding: 12px 15px; background: rgba(245,158,11,0.05); border-left: 3px solid #f59e0b; border-radius: 0 8px 8px 0; margin-bottom: 8px;">
+                    <strong>${rec.repo}</strong>: ${rec.rec}
+                </div>
+                `).join('')}
+            </div>
+            ` : ''}
+        </div>
+        ` : `
+        <div class="card" style="margin-bottom: 20px; background: rgba(34,197,94,0.05); border: 1px solid rgba(34,197,94,0.3);">
+            <h3 style="color: #22c55e;">✅ Good Practices Detected</h3>
+            <p style="color: #888;">No critical migration safety suggestions at this time. Your migration pipelines follow recommended practices.</p>
+        </div>
+        `}
+        
+        ${reposWithTools.filter(r => r.workflows.length > 0).length > 0 ? `
+        <div class="card">
+            <h3>📋 Pipeline Details</h3>
+            ${reposWithTools.filter(r => r.workflows.length > 0).map(repo => `
+            <div style="margin-bottom: 25px;">
+                <h4 style="margin-bottom: 15px;"><a href="https://github.com/${orgName}/${repo.repo}" target="_blank" style="color: #00d4ff; text-decoration: none;">${repo.repo}</a></h4>
+                <table>
+                    <thead>
+                        <tr><th>Workflow</th><th>Mode</th><th>Description</th></tr>
+                    </thead>
+                    <tbody>
+                        ${repo.workflows.map(wf => {
+                          const modeColor = wf.mode === 'explicit' ? '#a855f7' : wf.mode === 'build-integrated' ? '#f59e0b' : '#22c55e';
+                          const modeIcon = wf.mode === 'explicit' ? '📋' : wf.mode === 'build-integrated' ? '🔧' : '🚀';
+                          const modeLabel = wf.mode === 'explicit' ? 'Explicit' : wf.mode === 'build-integrated' ? 'Build-Integrated' : 'Runtime';
+                          return `
+                        <tr>
+                            <td><a href="https://github.com/${orgName}/${repo.repo}/blob/main/.github/workflows/${wf.name}" target="_blank" style="color: #00d4ff;">${wf.name}</a></td>
+                            <td><span style="background: rgba(255,255,255,0.05); padding: 4px 10px; border-radius: 8px;">${modeIcon} <span style="color: ${modeColor};">${modeLabel}</span></span></td>
+                            <td style="color: #888;">${wf.modeDescription || '-'}</td>
+                        </tr>
+                          `;
+                        }).join('')}
+                    </tbody>
+                </table>
+            </div>
+            `).join('')}
+        </div>
+        ` : ''}
+        
+        <div style="margin-top: 30px; padding: 20px; background: rgba(255,255,255,0.03); border-radius: 12px;">
+            <h4 style="margin-bottom: 15px;">📚 Learn More</h4>
+            <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 15px;">
+                <a href="https://docs.liquibase.com/workflows/liquibase-community/using-liquibase-best-practices.html" target="_blank" style="color: #00d4ff; text-decoration: none; padding: 12px; background: rgba(0,212,255,0.05); border-radius: 8px; display: block;">
+                    🔗 Liquibase Best Practices
+                </a>
+                <a href="https://documentation.red-gate.com/fd/flyway-best-practices-184127489.html" target="_blank" style="color: #00d4ff; text-decoration: none; padding: 12px; background: rgba(0,212,255,0.05); border-radius: 8px; display: block;">
+                    🔗 Flyway Best Practices
+                </a>
+                <a href="https://learn.microsoft.com/en-us/ef/core/managing-schemas/migrations/" target="_blank" style="color: #00d4ff; text-decoration: none; padding: 12px; background: rgba(0,212,255,0.05); border-radius: 8px; display: block;">
+                    🔗 EF Core Migrations Guide
+                </a>
+            </div>
+        </div>
+${htmlFoot}`;
+          writeFileSync(join(reportFolder, 'migration-details.html'), migrationDetailsHtml);
+          generatedReports.push('migration-details.html');
+        }
         
         generatedReports.push('dora-details.html', 'cicd-details.html', 'cost-details.html', 'security-details.html', 'maturity-details.html');
 

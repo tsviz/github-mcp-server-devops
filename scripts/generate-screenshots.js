@@ -22,12 +22,12 @@ if (!fs.existsSync(OUTPUT_DIR)) {
 }
 
 const pages = [
-  { file: 'dashboard.html', name: 'dashboard', width: 1400, height: 1200 },
-  { file: 'cicd-details.html', name: 'cicd-details', width: 1400, height: 1800 },
-  { file: 'cost-details.html', name: 'cost-details', width: 1400, height: 2000 },
-  { file: 'dora-details.html', name: 'dora-details', width: 1400, height: 1000 },
-  { file: 'security-details.html', name: 'security-details', width: 1400, height: 1200 },
-  { file: 'maturity-details.html', name: 'maturity-details', width: 1400, height: 1600 },
+  { file: 'dashboard.html', name: 'dashboard-overview', width: 1400, height: 1200 },
+  { file: 'cicd-details.html', name: 'dashboard-cicd', width: 1400, height: 1800 },
+  { file: 'cost-details.html', name: 'dashboard-cost', width: 1400, height: 2000 },
+  { file: 'dora-details.html', name: 'dashboard-dora', width: 1400, height: 1000 },
+  { file: 'security-details.html', name: 'dashboard-security', width: 1400, height: 1200 },
+  { file: 'maturity-details.html', name: 'dashboard-maturity', width: 1400, height: 1600 },
 ];
 
 async function generateScreenshots() {
@@ -63,12 +63,6 @@ async function generateScreenshots() {
     await browserPage.screenshot({
       path: path.join(OUTPUT_DIR, `${page.name}.png`),
       fullPage: true,
-    });
-    
-    // Also take a viewport screenshot for thumbnails
-    await browserPage.screenshot({
-      path: path.join(OUTPUT_DIR, `${page.name}-thumb.png`),
-      clip: { x: 0, y: 0, width: page.width, height: 800 },
     });
     
     await browserPage.close();

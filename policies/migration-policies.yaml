@@ -1,0 +1,208 @@
+apiVersion: devops.observer/v1
+kind: MigrationPolicy
+metadata:
+  name: database-migration-standards
+  version: "1.0.0"
+  description: "Standard database migration policies for safe and compliant schema changes"
+
+terms:
+  - name: "dba-team"
+    description: "Database administration team responsible for schema changes"
+  - name: "tech-lead"
+    description: "Technical lead responsible for code reviews and approvals"
+
+spec:
+  # ═══════════════════════════════════════════════════════════════════
+  # FORBIDDEN DBA OPERATIONS (should be manual/approved out-of-band)
+  # ═══════════════════════════════════════════════════════════════════
+  forbidden:
+    operations:
+      # Data Destruction
+      - pattern: "DROP\\s+DATABASE"
+        severity: critical
+        reason: "Database drops must be performed by DBAs with explicit approval"
+        
+      - pattern: "DROP\\s+SCHEMA"
+        severity: critical
+        reason: "Schema drops require DBA intervention"
+        
+      - pattern: "TRUNCATE\\s+TABLE"
+        severity: high
+        reason: "TRUNCATE operations require explicit approval"
+        exceptions:
+          - context: "test"
+          - context: "seed"
+          
+      - pattern: "DELETE\\s+FROM\\s+\\w+\\s*(;|$|WHERE\\s+1\\s*=\\s*1)"
+        severity: critical
+        reason: "Unrestricted DELETE operations are forbidden"
+        
+      # Privilege Escalation
+      - pattern: "GRANT\\s+.*\\s+TO"
+        severity: critical
+        reason: "Permission grants must be managed by DBAs"
+        
+      - pattern: "REVOKE\\s+.*\\s+FROM"
+        severity: critical
+        reason: "Permission revokes must be managed by DBAs"
+        
+      - pattern: "CREATE\\s+(USER|ROLE|LOGIN)"
+        severity: critical
+        reason: "User/role creation must be managed by DBAs"
+        
+      - pattern: "ALTER\\s+(USER|ROLE|LOGIN)"
+        severity: critical
+        reason: "User/role modifications must be managed by DBAs"
+        
+      - pattern: "DROP\\s+(USER|ROLE|LOGIN)"
+        severity: critical
+        reason: "User/role deletion must be managed by DBAs"
+        
+      # Dangerous Operations
+      - pattern: "ALTER\\s+SYSTEM"
+        severity: critical
+        reason: "System-level changes are forbidden in migrations"
+        
+      - pattern: "xp_cmdshell"
+        severity: critical
+        reason: "OS command execution is forbidden"
+        
+      - pattern: "BACKUP\\s+DATABASE"
+        severity: high
+        reason: "Backups should be handled by infrastructure, not migrations"
+        
+      - pattern: "RESTORE\\s+DATABASE"
+        severity: critical
+        reason: "Restores must be performed by DBAs"
+
+  # ═══════════════════════════════════════════════════════════════════
+  # RESTRICTED OPERATIONS (require approval or specific conditions)
+  # ═══════════════════════════════════════════════════════════════════
+  restricted:
+    operations:
+      # Schema Modifications
+      - pattern: "DROP\\s+TABLE"
+        severity: high
+        message: "Table drops require DBA approval for production"
+        requires:
+          approval: dba-team
+          environment:
+            - development
+            - staging
+        
+      - pattern: "DROP\\s+COLUMN|ALTER\\s+TABLE\\s+\\w+\\s+DROP\\s+COLUMN"
+        severity: high
+        message: "Column drops are backwards-incompatible"
+        requires:
+          approval: tech-lead
+        
+      - pattern: "ALTER\\s+TABLE.*ALTER\\s+COLUMN.*TYPE|ALTER\\s+TABLE.*MODIFY"
+        severity: medium
+        message: "Type changes may cause data loss"
+        requires:
+          approval: tech-lead
+
+      # Index Operations (can cause locks)
+      - pattern: "CREATE\\s+INDEX(?!\\s+CONCURRENTLY)"
+        severity: medium
+        database: postgresql
+        message: "Use CREATE INDEX CONCURRENTLY to avoid table locks"
+        autofix: "CREATE INDEX CONCURRENTLY"
+        
+      - pattern: "DROP\\s+INDEX(?!\\s+CONCURRENTLY)"
+        severity: medium
+        database: postgresql
+        message: "Use DROP INDEX CONCURRENTLY to avoid table locks"
+        
+      - pattern: "REINDEX"
+        severity: medium
+        message: "REINDEX can cause extended locks"
+        requires:
+          maintenanceWindow: true
+
+      # Constraint Modifications
+      - pattern: "ADD\\s+CONSTRAINT.*FOREIGN\\s+KEY"
+        severity: medium
+        message: "Foreign keys can cause migration failures on invalid data"
+        requires:
+          dataValidation: true
+          
+      - pattern: "ALTER\\s+TABLE.*ADD.*NOT\\s+NULL(?!\\s+DEFAULT)"
+        severity: medium
+        message: "Adding NOT NULL to existing column requires default value"
+        
+  # ═══════════════════════════════════════════════════════════════════
+  # REQUIRED PRACTICES
+  # ═══════════════════════════════════════════════════════════════════
+  requirements:
+    # Transaction Safety
+    transactions:
+      enabled: true
+      message: "Migrations must be wrapped in transactions"
+      exceptions:
+        - "CREATE INDEX CONCURRENTLY"
+        - "ALTER TYPE"
+        
+    # Rollback Scripts
+    rollback:
+      required: true
+      environments:
+        - staging
+        - production
+      message: "Production migrations must have rollback scripts"
+      
+    # Idempotency
+    idempotency:
+      required: true
+      patterns:
+        - "IF NOT EXISTS"
+        - "IF EXISTS"
+        - "CREATE OR REPLACE"
+      message: "Migrations should be idempotent (use IF EXISTS/IF NOT EXISTS)"
+      
+    # Naming Conventions
+    naming:
+      pattern: "^V\\d{4}_\\d{2}_\\d{2}_\\d{6}__[a-z_]+\\.(sql|py|rb)$"
+      message: "Migration files must follow: V{YYYY_MM_DD_HHMMSS}__{description}.sql"
+      examples:
+        - "V2024_01_15_143022__add_user_email_index.sql"
+        - "V2024_01_16_090000__create_orders_table.sql"
+        
+    # Size Limits
+    limits:
+      maxStatementsPerMigration: 10
+      maxAffectedTables: 5
+      message: "Break large migrations into smaller, focused changes"
+      
+  # ═══════════════════════════════════════════════════════════════════
+  # ENVIRONMENT-SPECIFIC RULES
+  # ═══════════════════════════════════════════════════════════════════
+  environments:
+    development:
+      enforcement: advisory
+      allowDestructive: true
+      requireApproval: false
+      
+    staging:
+      enforcement: advisory
+      allowDestructive: true
+      requireApproval: false
+      requireRollback: true
+      
+    production:
+      enforcement: strict
+      allowDestructive: false
+      requireApproval: true
+      requireRollback: true
+      requireMaintenanceWindow: true
+      approvers:
+        teams:
+          - dba-team
+          - platform-team
+      migrationWindows:
+        - days:
+            - tuesday
+            - wednesday
+            - thursday
+          hours: "02:00-06:00"
+          timezone: "UTC"

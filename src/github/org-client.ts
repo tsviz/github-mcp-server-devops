@@ -2800,6 +2800,251 @@ export class GitHubOrgClient {
   }
 
   /**
+   * Fetch migration files from a repository
+   * Scans known migration paths for different tools
+   */
+  async getMigrationFiles(
+    org: string,
+    repo: string,
+    migrationPaths: string[]
+  ): Promise<{
+    files: Array<{
+      name: string;
+      path: string;
+      content: string;
+      sha: string;
+      size: number;
+    }>;
+    repo: string;
+    detectedPath: string | null;
+    error?: string;
+  }> {
+    const files: Array<{
+      name: string;
+      path: string;
+      content: string;
+      sha: string;
+      size: number;
+    }> = [];
+    let detectedPath: string | null = null;
+
+    try {
+      // Try each migration path until we find one that exists
+      for (const migrationPath of migrationPaths) {
+        try {
+          const { data } = await this.octokit.rest.repos.getContent({
+            owner: org,
+            repo,
+            path: migrationPath,
+          });
+
+          if (Array.isArray(data)) {
+            detectedPath = migrationPath;
+            
+            // Get SQL/migration files (limit to 20 to avoid rate limits)
+            const migrationFiles = data
+              .filter(f => 
+                f.type === 'file' && 
+                (f.name.endsWith('.sql') || 
+                 f.name.endsWith('.xml') || 
+                 f.name.endsWith('.yaml') || 
+                 f.name.endsWith('.yml') ||
+                 f.name.endsWith('.py') ||
+                 f.name.endsWith('.rb') ||
+                 f.name.endsWith('.js') ||
+                 f.name.endsWith('.ts') ||
+                 f.name.endsWith('.cs'))
+              )
+              .slice(0, 20);
+
+            for (const file of migrationFiles) {
+              try {
+                const { data: fileData } = await this.octokit.rest.repos.getContent({
+                  owner: org,
+                  repo,
+                  path: file.path,
+                });
+
+                if ('content' in fileData && fileData.type === 'file') {
+                  const content = Buffer.from(fileData.content, 'base64').toString('utf-8');
+                  files.push({
+                    name: fileData.name,
+                    path: fileData.path,
+                    content,
+                    sha: fileData.sha,
+                    size: fileData.size,
+                  });
+                }
+              } catch {
+                // Skip files we can't read
+              }
+            }
+
+            // Found migrations, stop searching
+            if (files.length > 0) {
+              break;
+            }
+          }
+        } catch {
+          // Path doesn't exist, try next one
+          continue;
+        }
+      }
+
+      return { files, repo, detectedPath };
+    } catch (error: any) {
+      return {
+        files: [],
+        repo,
+        detectedPath: null,
+        error: error.message || 'Failed to fetch migration files',
+      };
+    }
+  }
+
+  /**
+   * Fetch build configuration files from a repository
+   * Returns pom.xml, build.gradle, package.json, *.csproj, etc.
+   */
+  async getBuildConfigFiles(
+    org: string,
+    repo: string
+  ): Promise<{
+    configs: Array<{
+      name: string;
+      path: string;
+      content: string;
+      type: 'maven' | 'gradle' | 'npm' | 'dotnet' | 'python' | 'ruby' | 'go' | 'unknown';
+    }>;
+    repo: string;
+    error?: string;
+  }> {
+    const configs: Array<{
+      name: string;
+      path: string;
+      content: string;
+      type: 'maven' | 'gradle' | 'npm' | 'dotnet' | 'python' | 'ruby' | 'go' | 'unknown';
+    }> = [];
+
+    const configFilesToCheck = [
+      { path: 'pom.xml', type: 'maven' as const },
+      { path: 'build.gradle', type: 'gradle' as const },
+      { path: 'build.gradle.kts', type: 'gradle' as const },
+      { path: 'package.json', type: 'npm' as const },
+      { path: 'requirements.txt', type: 'python' as const },
+      { path: 'pyproject.toml', type: 'python' as const },
+      { path: 'Gemfile', type: 'ruby' as const },
+      { path: 'go.mod', type: 'go' as const },
+    ];
+
+    try {
+      // Check for each config file
+      for (const configFile of configFilesToCheck) {
+        try {
+          const { data } = await this.octokit.rest.repos.getContent({
+            owner: org,
+            repo,
+            path: configFile.path,
+          });
+
+          if ('content' in data && data.type === 'file') {
+            const content = Buffer.from(data.content, 'base64').toString('utf-8');
+            configs.push({
+              name: data.name,
+              path: data.path,
+              content,
+              type: configFile.type,
+            });
+          }
+        } catch {
+          // File doesn't exist, continue
+        }
+      }
+
+      // Check for .csproj files in root and common subdirectories
+      const dirsToCheck = ['', 'src', 'app', 'Application', 'Web', 'Api', 'API'];
+      
+      for (const dir of dirsToCheck) {
+        try {
+          const { data: dirFiles } = await this.octokit.rest.repos.getContent({
+            owner: org,
+            repo,
+            path: dir,
+          });
+
+          if (Array.isArray(dirFiles)) {
+            const csprojFiles = dirFiles.filter(f => 
+              f.type === 'file' && 
+              (f.name.endsWith('.csproj') || f.name.endsWith('.fsproj'))
+            ).slice(0, 3);
+
+            for (const file of csprojFiles) {
+              try {
+                const { data } = await this.octokit.rest.repos.getContent({
+                  owner: org,
+                  repo,
+                  path: file.path,
+                });
+
+                if ('content' in data && data.type === 'file') {
+                  const content = Buffer.from(data.content, 'base64').toString('utf-8');
+                  configs.push({
+                    name: data.name,
+                    path: data.path,
+                    content,
+                    type: 'dotnet',
+                  });
+                }
+              } catch {
+                // Skip files we can't read
+              }
+            }
+            
+            // If we found csproj files, stop searching
+            if (csprojFiles.length > 0) break;
+          }
+        } catch {
+          // Directory doesn't exist, continue to next
+        }
+      }
+
+      return { configs, repo };
+    } catch (error: any) {
+      return {
+        configs: [],
+        repo,
+        error: error.message || 'Failed to fetch build config files',
+      };
+    }
+  }
+
+  /**
+   * Check if a file or directory exists in a repository
+   */
+  async checkPathExists(
+    org: string,
+    repo: string,
+    path: string
+  ): Promise<{ exists: boolean; type: 'file' | 'dir' | null }> {
+    try {
+      const { data } = await this.octokit.rest.repos.getContent({
+        owner: org,
+        repo,
+        path,
+      });
+
+      if (Array.isArray(data)) {
+        return { exists: true, type: 'dir' };
+      } else if ('type' in data) {
+        return { exists: true, type: data.type === 'file' ? 'file' : 'dir' };
+      }
+      return { exists: true, type: null };
+    } catch {
+      return { exists: false, type: null };
+    }
+  }
+
+  /**
    * Fetch workflow file content from a repository
    */
   async getWorkflowFileContent(

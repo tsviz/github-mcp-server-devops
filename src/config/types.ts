@@ -264,6 +264,103 @@ export interface DashboardWidget {
 }
 
 // ============================================
+// Migration Policies (imported from migrations module)
+// ============================================
+
+export interface MigrationPolicy {
+  apiVersion: string;
+  kind: 'MigrationPolicy';
+  metadata: PolicyMetadata;
+  spec: MigrationPolicySpec;
+}
+
+export interface MigrationPolicySpec {
+  forbidden?: MigrationForbiddenOperations;
+  restricted?: MigrationRestrictedOperations;
+  requirements?: MigrationRequirements;
+  environments?: Record<string, MigrationEnvironmentPolicy>;
+}
+
+export interface MigrationForbiddenOperations {
+  operations: MigrationForbiddenOperation[];
+}
+
+export interface MigrationForbiddenOperation {
+  pattern: string;
+  severity: 'critical' | 'high' | 'medium';
+  reason: string;
+  exceptions?: Array<{
+    context?: string;
+    pattern?: string;
+    environments?: string[];
+  }>;
+}
+
+export interface MigrationRestrictedOperations {
+  operations: MigrationRestrictedOperation[];
+}
+
+export interface MigrationRestrictedOperation {
+  pattern: string;
+  severity: 'critical' | 'high' | 'medium' | 'low';
+  message: string;
+  database?: string;
+  autofix?: string;
+  requires?: {
+    approval?: string;
+    environment?: string[];
+    migrationWindow?: boolean;
+    maintenanceWindow?: boolean;
+    dataValidation?: boolean;
+  };
+}
+
+export interface MigrationRequirements {
+  transactions?: {
+    enabled: boolean;
+    message: string;
+    exceptions?: string[];
+  };
+  rollback?: {
+    required: boolean;
+    environments: string[];
+    message: string;
+  };
+  idempotency?: {
+    required: boolean;
+    patterns: string[];
+    message: string;
+  };
+  naming?: {
+    pattern: string;
+    message: string;
+    examples?: string[];
+  };
+  limits?: {
+    maxStatementsPerMigration: number;
+    maxAffectedTables: number;
+    message: string;
+  };
+}
+
+export interface MigrationEnvironmentPolicy {
+  enforcement: 'strict' | 'advisory' | 'disabled';
+  allowDestructive: boolean;
+  requireApproval: boolean;
+  requireRollback?: boolean;
+  requireMaintenanceWindow?: boolean;
+  approvers?: {
+    teams?: string[];
+    users?: string[];
+  };
+  migrationWindows?: Array<{
+    days: string[];
+    hours: string;
+    timezone: string;
+  }>;
+}
+
+// ============================================
 // Loaded Configuration State
 // ============================================
 
@@ -272,6 +369,7 @@ export interface LoadedConfig {
   workflowPolicies: WorkflowPolicy[];
   securityPolicies: SecurityPolicy[];
   costPolicies: CostPolicy[];
+  migrationPolicies: MigrationPolicy[];
   repositoryInventory: RepositoryInventory | null;
   dashboards: DashboardConfig[];
   loadedAt: Date;

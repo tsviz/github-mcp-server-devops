@@ -21,6 +21,7 @@ import {
   WorkflowPolicy,
   SecurityPolicy,
   CostPolicy,
+  MigrationPolicy,
   RepositoryInventory,
   DashboardConfig,
 } from './types.js';
@@ -62,6 +63,8 @@ const DISCOVERY_PATHS = {
     'policies/security-policies.yml',
     'policies/cost-policies.yaml',
     'policies/cost-policies.yml',
+    'policies/migration-policies.yaml',
+    'policies/migration-policies.yml',
     'policies/compliance-policies.yaml',
     'policies/compliance-policies.yml',
   ],
@@ -212,6 +215,11 @@ export class ConfigLoader {
       'cost',
       errors
     );
+    const migrationPolicies = await this.loadPoliciesFromLocal<MigrationPolicy>(
+      basePath,
+      'migration',
+      errors
+    );
 
     // Load repository inventory
     const repositoryInventory = await this.loadInventoryFromLocal(basePath, errors);
@@ -224,6 +232,7 @@ export class ConfigLoader {
       workflowPolicies,
       securityPolicies,
       costPolicies,
+      migrationPolicies,
       repositoryInventory,
       dashboards,
       loadedAt: new Date(),
@@ -285,6 +294,13 @@ export class ConfigLoader {
       'cost',
       errors
     );
+    const migrationPolicies = await this.loadPoliciesFromRemote<MigrationPolicy>(
+      owner,
+      repo,
+      branch,
+      'migration',
+      errors
+    );
 
     // Load repository inventory
     const repositoryInventory = await this.loadInventoryFromRemote(
@@ -302,6 +318,7 @@ export class ConfigLoader {
       workflowPolicies,
       securityPolicies,
       costPolicies,
+      migrationPolicies,
       repositoryInventory,
       dashboards,
       loadedAt: new Date(),
@@ -564,6 +581,7 @@ export class ConfigLoader {
       workflowPolicies: [],
       securityPolicies: [],
       costPolicies: [],
+      migrationPolicies: [],
       repositoryInventory: null,
       dashboards: [],
       loadedAt: new Date(),

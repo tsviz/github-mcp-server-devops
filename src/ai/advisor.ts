@@ -1398,3 +1398,262 @@ export async function generateWorkflowSourceInsights(context: WorkflowSourceCont
     };
   }
 }
+
+// ============================================
+// Migration Insights
+// ============================================
+
+export interface MigrationSourceContext {
+  organization: string;
+  repository: string;
+  migrationFile: string;
+  migrationTool: string;
+  database: string;
+  content: string;
+  staticAnalysis: {
+    operations: Array<{
+      type: string;
+      target: string;
+      line: number;
+      riskLevel: string;
+    }>;
+    violations: Array<{
+      rule: string;
+      severity: string;
+      message: string;
+      line?: number;
+    }>;
+    warnings: Array<{
+      rule: string;
+      message: string;
+      line?: number;
+    }>;
+    riskAssessment: {
+      level: string;
+      score: number;
+      factors: Array<{
+        name: string;
+        impact: string;
+        description: string;
+      }>;
+    };
+  };
+}
+
+export interface MigrationInsightResult {
+  success: boolean;
+  insights: string;
+  provider: string;
+  model: string;
+  cached: boolean;
+  error?: string;
+}
+
+const MIGRATION_INSIGHTS_PROMPT = `Analyze this database migration file and provide specific, actionable recommendations for safe deployment.
+
+## Migration Details
+- **Repository:** {{repository}}
+- **File:** {{migrationFile}}
+- **Migration Tool:** {{migrationTool}}
+- **Database:** {{database}}
+
+## SQL Content (first 200 lines)
+\`\`\`sql
+{{contentPreview}}
+\`\`\`
+
+## Static Analysis Results
+**Risk Level:** {{riskLevel}} (Score: {{riskScore}}/100)
+
+**Operations Detected:**
+{{operationsSummary}}
+
+**Policy Violations:**
+{{violationsSummary}}
+
+**Warnings:**
+{{warningsSummary}}
+
+**Risk Factors:**
+{{riskFactorsSummary}}
+
+Provide recommendations in this format:
+
+### 🎯 Migration Summary
+[2-3 sentences describing what this migration does and its overall risk]
+
+### 🚨 Critical Issues
+[List any blocking issues that must be fixed before deployment]
+
+### ⚠️ Recommended Changes
+[Specific code changes with examples]
+
+\`\`\`sql
+-- Before
+[Original problematic code]
+
+-- After (recommended)
+[Improved code with explanation]
+\`\`\`
+
+### 🔒 Safety Checklist
+- [ ] Backup taken before execution
+- [ ] Tested in staging environment
+- [ ] Rollback script prepared
+- [ ] Scheduled during maintenance window
+- [Add any migration-specific checks]
+
+### 📋 Deployment Steps
+1. [Step-by-step deployment instructions]
+2. [Include validation queries]
+3. [Include rollback procedure if needed]
+
+### 💡 Best Practice Tips
+[2-3 tips specific to this migration type/tool]
+
+Keep response under 500 words but include all code examples.`;
+
+function generateStaticMigrationInsights(context: MigrationSourceContext): string {
+  const { staticAnalysis } = context;
+  let insights = `### 📊 Static Analysis Results\n\n`;
+
+  // Risk assessment
+  const riskEmoji = staticAnalysis.riskAssessment.level === 'critical' ? '🔴' :
+                   staticAnalysis.riskAssessment.level === 'high' ? '🟠' :
+                   staticAnalysis.riskAssessment.level === 'medium' ? '🟡' : '🟢';
+  insights += `**Risk Level:** ${riskEmoji} ${staticAnalysis.riskAssessment.level} (Score: ${staticAnalysis.riskAssessment.score}/100)\n\n`;
+
+  // Operations
+  if (staticAnalysis.operations.length > 0) {
+    insights += `#### Operations Detected\n`;
+    const opsByType = staticAnalysis.operations.reduce((acc, op) => {
+      acc[op.type] = acc[op.type] || [];
+      acc[op.type].push(op);
+      return acc;
+    }, {} as Record<string, typeof staticAnalysis.operations>);
+    
+    for (const [type, ops] of Object.entries(opsByType)) {
+      const riskIcon = ops.some(o => o.riskLevel === 'critical') ? '🔴' :
+                      ops.some(o => o.riskLevel === 'high') ? '🟠' :
+                      ops.some(o => o.riskLevel === 'medium') ? '🟡' : '🟢';
+      insights += `- ${riskIcon} **${type.toUpperCase()}**: ${ops.map(o => o.target).join(', ')}\n`;
+    }
+    insights += '\n';
+  }
+
+  // Violations
+  if (staticAnalysis.violations.length > 0) {
+    insights += `#### 🚨 Policy Violations\n`;
+    for (const v of staticAnalysis.violations) {
+      const icon = v.severity === 'critical' ? '🔴' : v.severity === 'high' ? '🟠' : '🟡';
+      insights += `- ${icon} **${v.severity.toUpperCase()}**: ${v.message}`;
+      if (v.line) insights += ` (line ${v.line})`;
+      insights += '\n';
+    }
+    insights += '\n';
+  }
+
+  // Warnings
+  if (staticAnalysis.warnings.length > 0) {
+    insights += `#### ⚠️ Warnings\n`;
+    for (const w of staticAnalysis.warnings) {
+      insights += `- ${w.message}\n`;
+    }
+    insights += '\n';
+  }
+
+  // Risk factors
+  if (staticAnalysis.riskAssessment.factors.length > 0) {
+    insights += `#### Risk Factors\n`;
+    for (const f of staticAnalysis.riskAssessment.factors) {
+      const icon = f.impact === 'critical' ? '🔴' : f.impact === 'high' ? '🟠' : '🟡';
+      insights += `- ${icon} **${f.name}**: ${f.description}\n`;
+    }
+    insights += '\n';
+  }
+
+  // Safety recommendations
+  insights += `#### 🔒 Safety Recommendations\n`;
+  insights += `- Always run migrations in staging first\n`;
+  insights += `- Prepare a rollback script before production deployment\n`;
+  insights += `- Take a database backup before applying changes\n`;
+  if (staticAnalysis.riskAssessment.level === 'high' || staticAnalysis.riskAssessment.level === 'critical') {
+    insights += `- **Schedule during maintenance window due to ${staticAnalysis.riskAssessment.level} risk**\n`;
+    insights += `- **Require DBA review before proceeding**\n`;
+  }
+
+  return insights;
+}
+
+/**
+ * Generate AI-powered migration insights with static analysis fallback
+ */
+export async function generateMigrationInsights(
+  context: MigrationSourceContext
+): Promise<MigrationInsightResult> {
+  const config = getConfig();
+  
+  // Prepare summary data
+  const operationsSummary = context.staticAnalysis.operations
+    .map(o => `- ${o.type.toUpperCase()} ${o.target} (line ${o.line}, ${o.riskLevel} risk)`)
+    .join('\n') || 'No operations detected';
+    
+  const violationsSummary = context.staticAnalysis.violations
+    .map(v => `- [${v.severity.toUpperCase()}] ${v.message}${v.line ? ` (line ${v.line})` : ''}`)
+    .join('\n') || 'No violations found';
+    
+  const warningsSummary = context.staticAnalysis.warnings
+    .map(w => `- ${w.message}`)
+    .join('\n') || 'No warnings';
+    
+  const riskFactorsSummary = context.staticAnalysis.riskAssessment.factors
+    .map(f => `- **${f.name}** (${f.impact}): ${f.description}`)
+    .join('\n') || 'No specific risk factors identified';
+
+  if (!config.enabled) {
+    return {
+      success: true,
+      insights: generateStaticMigrationInsights(context),
+      provider: 'static',
+      model: 'none',
+      cached: false,
+    };
+  }
+
+  try {
+    const promptContext = {
+      repository: `${context.organization}/${context.repository}`,
+      migrationFile: context.migrationFile,
+      migrationTool: context.migrationTool,
+      database: context.database,
+      contentPreview: context.content.split('\n').slice(0, 200).join('\n'),
+      riskLevel: context.staticAnalysis.riskAssessment.level,
+      riskScore: context.staticAnalysis.riskAssessment.score,
+      operationsSummary,
+      violationsSummary,
+      warningsSummary,
+      riskFactorsSummary,
+    };
+
+    const prompt = renderTemplate(MIGRATION_INSIGHTS_PROMPT, promptContext);
+    const insights = await callGitHubCopilot(prompt, SYSTEM_PROMPT, config);
+
+    return {
+      success: true,
+      insights: `### 🤖 AI-Powered Migration Analysis\n> Powered by GitHub Copilot 🚀 | Analyzed database migration\n\n${insights}`,
+      provider: 'GitHub Copilot',
+      model: config.model,
+      cached: false,
+    };
+  } catch (error) {
+    console.error('AI Advisor error for migration:', error);
+    return {
+      success: false,
+      insights: generateStaticMigrationInsights(context),
+      provider: 'static (fallback)',
+      model: 'none',
+      cached: false,
+      error: error instanceof Error ? error.message : String(error),
+    };
+  }
+}
